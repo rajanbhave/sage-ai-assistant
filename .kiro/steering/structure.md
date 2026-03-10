@@ -81,4 +81,6 @@ sage-ai-assistant/
 - No IaC — all deployment is via shell scripts in `scripts/`.
 - Gateway → MCP Server auth uses OAuth M2M (client credentials), not IAM. The `deploy_gateway.py` script creates the Cognito resource server, M2M client, and AgentCore credential provider. The `deploy_mcp.sh` script configures the MCP runtime with JWT inbound auth.
 - All Python scripts that make AWS API calls include an IPv4 monkey-patch at the top — macOS resolves AWS endpoints to IPv6 but the route is dead, causing hangs. Never remove this patch from `deploy_gateway.py` or `get_token.py`.
-- JWT authorizer on both runtimes uses `allowedClients` (not `allowedAudience`) — Cognito `client_credentials` tokens have a `client_id` claim but no `aud` claim.
+- Agent runtime JWT authorizer uses `allowedAudience` when Phase 2 is active (user ID tokens carry `aud` = client ID) or `allowedClients` as Phase 1 fallback (M2M tokens carry `client_id`, no `aud`).
+- MCP runtime JWT authorizer always uses `allowedClients` — it only ever receives M2M `client_credentials` tokens from the Gateway.
+- Two separate Cognito pools: `sage-tenant-pool` (user ID tokens, Phase 2) and `sage-mcp-pool` (M2M tokens, Gateway→MCP). Never mix them.

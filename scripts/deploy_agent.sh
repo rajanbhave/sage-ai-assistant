@@ -32,12 +32,41 @@ echo "Project root: $PROJECT_ROOT"
 echo ""
 
 # ── 0. Resolve Cognito details for JWT inbound authorization ─────────
-# Same Cognito pool used for MCP server — frontend gets a user token
-# from this pool to call the agent runtime directly.
+# Phase 2: prefer the tenant user pool (user_pool_output.json) which
+# issues per-tenant JWTs with custom:tenant_id claims.
+# Phase 1 fallback: use the M2M pool from gateway_output.json.
+#
+# Token type matters for the correct validator field:
+#   - User ID tokens (USER_SRP_AUTH): carry `aud` = client ID → use allowedAudience
+#   - M2M tokens (client_credentials): carry `client_id`, no `aud` → use allowedClients
 
+USER_POOL_OUTPUT_FILE="$SCRIPT_DIR/user_pool_output.json"
 AUTHORIZER_CONFIG_FLAG=""
 
-if [[ -f "$GATEWAY_OUTPUT_FILE" ]]; then
+if [[ -f "$USER_POOL_OUTPUT_FILE" ]]; then
+  # Phase 2: tenant user pool — ID tokens use allowedAudience (aud claim = client ID)
+  COGNITO_POOL_ID=$(jq -r '.userPoolId // empty' "$USER_POOL_OUTPUT_FILE" 2>/dev/null || true)
+  AXA_CLIENT_ID=$(jq -r '.axaClientId // empty' "$USER_POOL_OUTPUT_FILE" 2>/dev/null || true)
+  ALLIANZ_CLIENT_ID=$(jq -r '.allianzClientId // empty' "$USER_POOL_OUTPUT_FILE" 2>/dev/null || true)
+
+  if [[ -n "$COGNITO_POOL_ID" && -n "$AXA_CLIENT_ID" && -n "$ALLIANZ_CLIENT_ID" ]]; then
+    DISCOVERY_URL="https://cognito-idp.${REGION}.amazonaws.com/${COGNITO_POOL_ID}/.well-known/openid-configuration"
+    # User ID tokens carry aud = client_id, so use allowedAudience (not allowedClients)
+    AUTHORIZER_JSON="{\"customJWTAuthorizer\":{\"discoveryUrl\":\"${DISCOVERY_URL}\",\"allowedAudience\":[\"${AXA_CLIENT_ID}\",\"${ALLIANZ_CLIENT_ID}\"]}}"
+    AUTHORIZER_CONFIG_FLAG="--authorizer-config ${AUTHORIZER_JSON}"
+    echo "Step 0: Phase 2 JWT inbound authorization enabled (tenant user pool)"
+    echo "  Cognito Pool ID:   $COGNITO_POOL_ID"
+    echo "  AXA Client ID:     $AXA_CLIENT_ID"
+    echo "  Allianz Client ID: $ALLIANZ_CLIENT_ID"
+    echo "  Discovery URL:     $DISCOVERY_URL"
+  else
+    echo "Step 0: WARNING — user_pool_output.json missing required fields"
+    echo "  Falling back to Phase 1 M2M pool..."
+  fi
+fi
+
+# Phase 1 fallback: use M2M client from gateway_output.json
+if [[ -z "$AUTHORIZER_CONFIG_FLAG" && -f "$GATEWAY_OUTPUT_FILE" ]]; then
   COGNITO_POOL_ID=$(jq -r '.cognitoPoolId // empty' "$GATEWAY_OUTPUT_FILE" 2>/dev/null || true)
   M2M_CLIENT_ID=$(jq -r '.cognitoM2mClientId // empty' "$GATEWAY_OUTPUT_FILE" 2>/dev/null || true)
 
@@ -45,15 +74,17 @@ if [[ -f "$GATEWAY_OUTPUT_FILE" ]]; then
     DISCOVERY_URL="https://cognito-idp.${REGION}.amazonaws.com/${COGNITO_POOL_ID}/.well-known/openid-configuration"
     AUTHORIZER_JSON="{\"customJWTAuthorizer\":{\"discoveryUrl\":\"${DISCOVERY_URL}\",\"allowedClients\":[\"${M2M_CLIENT_ID}\"]}}"
     AUTHORIZER_CONFIG_FLAG="--authorizer-config ${AUTHORIZER_JSON}"
-    echo "Step 0: JWT inbound authorization enabled"
+    echo "Step 0: Phase 1 JWT inbound authorization enabled (M2M pool)"
     echo "  Cognito Pool ID: $COGNITO_POOL_ID"
     echo "  Discovery URL:   $DISCOVERY_URL"
   else
     echo "Step 0: WARNING — gateway_output.json missing Cognito details"
     echo "  Deploying WITHOUT JWT inbound auth."
   fi
-else
-  echo "Step 0: No gateway_output.json found — deploying WITHOUT JWT inbound auth."
+fi
+
+if [[ -z "$AUTHORIZER_CONFIG_FLAG" ]]; then
+  echo "Step 0: No Cognito output files found — deploying WITHOUT JWT inbound auth."
 fi
 echo ""
 
@@ -114,7 +145,7 @@ if [[ -n "$GATEWAY_URL" ]]; then
   ENV_FLAGS+=(--env "GATEWAY_AUTH_CLIENT_SECRET=${GATEWAY_AUTH_CLIENT_SECRET}")
   ENV_FLAGS+=(--env "GATEWAY_AUTH_SCOPE=${GATEWAY_AUTH_SCOPE}")
 fi
-uv run agentcore launch "${ENV_FLAGS[@]}"
+uv run agentcore launch ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"}
 
 echo ""
 echo "=== Agent deployment complete ==="

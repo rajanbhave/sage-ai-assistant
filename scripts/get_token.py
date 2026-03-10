@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Get an M2M access token from Cognito for the frontend.
+"""Get an M2M access token from Cognito for the frontend (Phase 1 only).
+
+This script is for Phase 1 deployments that use static M2M tokens.
+In Phase 2, the frontend authenticates users directly via Cognito and
+obtains ID tokens — this script is not needed.
 
 Bypasses macOS DNS cache issues by resolving via nslookup and connecting
 directly to the IP with SNI.
 
 Usage:
   python3 scripts/get_token.py
+
+Prerequisites:
+  - Phase 1 deployment: deploy_gateway.sh must have been run first
+  - gateway_output.json must exist with Cognito M2M credentials
 """
 
 import json
@@ -26,8 +34,14 @@ import base64
 import boto3
 import http.client
 
-with open("scripts/gateway_output.json") as f:
-    gw = json.load(f)
+try:
+    with open("scripts/gateway_output.json") as f:
+        gw = json.load(f)
+except FileNotFoundError:
+    print("ERROR: scripts/gateway_output.json not found", file=sys.stderr)
+    print("This script is for Phase 1 deployments only.", file=sys.stderr)
+    print("Run: bash scripts/deploy_gateway.sh", file=sys.stderr)
+    sys.exit(1)
 
 pool_id = gw["cognitoPoolId"]
 client_id = gw["cognitoM2mClientId"]

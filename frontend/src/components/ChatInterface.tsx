@@ -33,6 +33,8 @@ interface Message {
 
 interface ChatInterfaceProps {
   tenantId: string;
+  /** Phase 2: Cognito ID token. When present, sent as Authorization header. */
+  jwtToken?: string;
 }
 
 // --- Helpers ---
@@ -43,7 +45,7 @@ function generateId(): string {
 
 // --- Component ---
 
-export function ChatInterface({ tenantId }: ChatInterfaceProps) {
+export function ChatInterface({ tenantId, jwtToken }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -159,7 +161,7 @@ export function ChatInterface({ tenantId }: ChatInterfaceProps) {
           updated[idx] = msg as Message;
           return updated;
         });
-      });
+      }, jwtToken);
     } catch (err) {
       const errorText =
         err instanceof Error ? err.message : "An unexpected error occurred.";
@@ -182,7 +184,7 @@ export function ChatInterface({ tenantId }: ChatInterfaceProps) {
         )
       );
     }
-  }, [input, isStreaming, tenantId]);
+  }, [input, isStreaming, tenantId, jwtToken]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {

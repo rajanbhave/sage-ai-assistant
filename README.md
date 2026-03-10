@@ -5,20 +5,30 @@ A multi-tenant, domain-aware conversational AI agent for the Insurance Suite, bu
 ## Architecture
 
 ```
-React Frontend
-    │  POST /invocations + X-...-Tenant-Id header
+React Frontend (login screen)
+    │  USER_PASSWORD_AUTH → Cognito tenant pool (sage-tenant-pool)
+    │  ← ID token (custom:tenant_id = "axa" | "allianz")
+    │
+    │  POST /invocations
+    │  Authorization: Bearer <id_token>
     ▼
 AgentCore Runtime — Strands Agent (agent/agent.py)
-    │  OAuth M2M + tenant header forwarding
+    │  JWT authorizer: allowedAudience = [axaClientId, allianzClientId]
+    │  Decodes JWT → extracts custom:tenant_id
+    │  Fetches M2M token from sage-mcp-pool (client_credentials)
+    │  Forwards: Authorization: Bearer <m2m_token>
+    │            X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id: <tenant>
     ▼
 AgentCore Gateway — Semantic routing over tool descriptions
-    │  OAuth M2M (Cognito client_credentials)
+    │  OAuth M2M (Cognito sage-mcp-pool, client_credentials)
     ▼
 AgentCore Runtime — FastMCP Server (mcp_server/server.py)
+    │  JWT authorizer: allowedClients = [m2mClientId]
+    │  Propagates X-...-Tenant-Id header to all tools
     ├── load_claims_workflow_context  →  skills/claims_workflow.md
     ├── load_premium_formulas_context →  skills/premium_formulas.md
-    ├── get_product_info              →  mcp_server/mock_data.py (tenant-scoped)
-    └── get_claim_details             →  mcp_server/mock_data.py (tenant-scoped)
+    ├── get_product_info              →  mcp_server/mock_data.py (filtered by tenant)
+    └── get_claim_details             →  mcp_server/mock_data.py (filtered by tenant)
 ```
 
 **Key design decisions:**
@@ -27,7 +37,8 @@ AgentCore Runtime — FastMCP Server (mcp_server/server.py)
 - AgentCore Gateway replaces a classifier model — semantic search over tool descriptions routes queries automatically
 - Tenant isolation via `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header, propagated end-to-end
 - Skills are plain Markdown files — editable without code changes or redeployment
-- JWT `allowedClients` (not `allowedAudience`) — Cognito M2M tokens carry `client_id` but no `aud` claim
+- Agent runtime: `allowedAudience` (Phase 2, user ID tokens carry `aud` = client ID) or `allowedClients` fallback (Phase 1, M2M tokens)
+- MCP runtime: `allowedClients` — Gateway always uses M2M `client_credentials` tokens which carry `client_id` but no `aud` claim
 
 ## Tech Stack
 
@@ -37,7 +48,7 @@ AgentCore Runtime — FastMCP Server (mcp_server/server.py)
 | Foundation model | Claude Sonnet 4.5 via Amazon Bedrock |
 | MCP server | FastMCP (Python), port 8000, `stateless_http=True` |
 | Gateway | AgentCore Gateway with semantic search |
-| Auth | Cognito M2M OAuth (client_credentials grant) |
+| Auth | Cognito: tenant pool (user ID tokens, Phase 2) + M2M pool (Gateway→MCP) |
 | Frontend | React 18 + Vite + Tailwind CSS + shadcn/ui |
 | Streaming | Direct SSE from `/invocations` (FAST pattern) |
 | Runtime | Python 3.13, `uv` for dependency management |
@@ -171,9 +182,9 @@ Packages and deploys the Strands agent to AgentCore Runtime. Injects `GATEWAY_UR
 bash scripts/deploy_agent.sh
 ```
 
-### Step 4 — Get a bearer token
+### Step 4 — Get a bearer token (Phase 1 only)
 
-Fetches a fresh M2M token from Cognito and auto-updates `frontend/.env.local`.
+Only needed when running without Cognito login (`VITE_COGNITO_*` vars not set). In Phase 2, users authenticate directly — skip this step.
 
 ```bash
 uv run python scripts/get_token.py
@@ -189,23 +200,27 @@ For production, deploy the frontend to AWS Amplify Hosting.
 
 ## Authentication Flow
 
+Two separate Cognito pools, two token types:
+
 ```
-Frontend ──(Bearer token)──► Agent Runtime
-                                  │
-                          (OAuth M2M client_credentials)
-                                  │
-                                  ▼
-                           AgentCore Gateway
-                                  │
-                          (OAuth M2M client_credentials)
-                                  │
-                                  ▼
-                            MCP Runtime (JWT inbound auth)
+# Phase 2 (active): user login
+React (login) ──(USER_PASSWORD_AUTH)──► Cognito tenant pool (sage-tenant-pool)
+                                              │ ID token (custom:tenant_id)
+                                              ▼
+React (chat) ──(Authorization: Bearer <id_token>)──► Agent Runtime
+                                                           │ allowedAudience = [axaClientId, allianzClientId]
+                                                           │ decode JWT → extract custom:tenant_id
+                                                           ▼
+                                                    AgentCore Gateway
+                                                           │ OAuth M2M (client_credentials)
+                                                           ▼
+                                                     MCP Runtime (allowedClients = [m2mClientId])
+                                                     filters data by tenant_id header
 ```
 
-- All tokens are issued by a single Cognito User Pool (`sage-mcp-pool`)
-- The JWT authorizer uses `allowedClients` (not `allowedAudience`) — Cognito M2M tokens carry `client_id` but no `aud` claim
-- To refresh the token: `uv run python scripts/get_token.py`
+- Agent runtime: `allowedAudience` — ID tokens carry `aud` = client ID
+- MCP runtime: `allowedClients` — M2M tokens carry `client_id`, no `aud`
+- Phase 1 fallback: set `VITE_AGENT_BEARER_TOKEN` (M2M token), leave `VITE_COGNITO_*` vars empty → frontend shows tenant dropdown instead of login screen
 
 ## Adding New Capabilities
 
@@ -249,3 +264,43 @@ cd frontend && npm test
 | `GATEWAY_AUTH_CLIENT_ID` | Cognito M2M client ID |
 | `GATEWAY_AUTH_CLIENT_SECRET` | Cognito M2M client secret |
 | `GATEWAY_AUTH_SCOPE` | OAuth scope (`sage-mcp/tools`) |
+
+## Phase 2: JWT Tenant Authentication (Active)
+
+Phase 2 is the current active mode. Users log in via Cognito and the ID token carries their tenant identity — no static bearer token needed.
+
+### Setup (already deployed)
+
+```bash
+# 1. Create the tenant user pool (sage-tenant-pool) with AXA + Allianz app clients
+uv run python scripts/deploy_user_pool.py
+# Saves outputs to scripts/user_pool_output.json
+
+# 2. Redeploy the agent with Phase 2 JWT inbound auth
+#    (reads user_pool_output.json, configures allowedAudience for both tenant clients)
+bash scripts/deploy_agent.sh
+
+# 3. Set frontend/.env.local with Cognito client IDs (from user_pool_output.json)
+# VITE_COGNITO_USER_POOL_ID=<userPoolId>
+# VITE_COGNITO_AXA_CLIENT_ID=<axaClientId>
+# VITE_COGNITO_ALLIANZ_CLIENT_ID=<allianzClientId>
+# VITE_COGNITO_DOMAIN=<cognitoHostedUiDomain>
+```
+
+When all four `VITE_COGNITO_*` variables are set, the frontend shows a login screen instead of the tenant dropdown and sends the Cognito ID token as `Authorization: Bearer` on every request.
+
+### Frontend environment variables (Phase 2)
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_COGNITO_USER_POOL_ID` | Cognito User Pool ID from `user_pool_output.json` |
+| `VITE_COGNITO_AXA_CLIENT_ID` | AXA app client ID from `user_pool_output.json` |
+| `VITE_COGNITO_ALLIANZ_CLIENT_ID` | Allianz app client ID from `user_pool_output.json` |
+| `VITE_COGNITO_DOMAIN` | Cognito hosted UI domain (not required for direct auth) |
+
+### Demo credentials
+
+| Tenant | Username | Password |
+|--------|----------|----------|
+| AXA | `axa-user` | `AXApassword1` |
+| Allianz | `allianz-user` | `Allianzpassword1` |

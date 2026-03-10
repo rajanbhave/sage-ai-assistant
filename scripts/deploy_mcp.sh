@@ -39,12 +39,20 @@ echo "Project root: $PROJECT_ROOT"
 echo ""
 
 # ── 0. Resolve Cognito details for JWT inbound authorization ─────────
-# The gateway deployment (deploy_gateway.sh) creates a Cognito User Pool
-# and M2M app client. We read those from gateway_output.json to configure
-# JWT inbound auth on the MCP runtime.
+# Phase 2: prefer the tenant user pool (user_pool_output.json) which
+# issues per-tenant JWTs with custom:tenant_id claims.
+# Phase 1 fallback: use the M2M pool from gateway_output.json.
+#
+# allowedClients must list ALL client IDs that are permitted to call the
+# MCP runtime — Cognito client_credentials tokens carry client_id (not
+# aud), so allowedClients is the correct validator (not allowedAudience).
 
 AUTHORIZER_CONFIG_FLAG=""
 
+# MCP server ALWAYS uses the M2M pool from gateway_output.json.
+# The gateway authenticates to the MCP runtime using client_credentials tokens
+# issued by the M2M pool — these carry client_id (not aud), so allowedClients
+# is the correct validator. The tenant user pool is only for frontend→agent auth.
 if [[ -f "$GATEWAY_OUTPUT_FILE" ]]; then
   COGNITO_POOL_ID=$(jq -r '.cognitoPoolId // empty' "$GATEWAY_OUTPUT_FILE" 2>/dev/null || true)
   M2M_CLIENT_ID=$(jq -r '.cognitoM2mClientId // empty' "$GATEWAY_OUTPUT_FILE" 2>/dev/null || true)
@@ -53,17 +61,16 @@ if [[ -f "$GATEWAY_OUTPUT_FILE" ]]; then
     DISCOVERY_URL="https://cognito-idp.${REGION}.amazonaws.com/${COGNITO_POOL_ID}/.well-known/openid-configuration"
     AUTHORIZER_JSON="{\"customJWTAuthorizer\":{\"discoveryUrl\":\"${DISCOVERY_URL}\",\"allowedClients\":[\"${M2M_CLIENT_ID}\"]}}"
     AUTHORIZER_CONFIG_FLAG="--authorizer-config ${AUTHORIZER_JSON}"
-    echo "Step 0: JWT inbound authorization enabled"
+    echo "Step 0: JWT inbound authorization enabled (M2M pool — gateway→MCP)"
     echo "  Cognito Pool ID: $COGNITO_POOL_ID"
     echo "  M2M Client ID:   $M2M_CLIENT_ID"
     echo "  Discovery URL:   $DISCOVERY_URL"
   else
-    echo "Step 0: WARNING — gateway_output.json missing cognitoPoolId or cognitoM2mClientId"
-    echo "  Deploying WITHOUT JWT inbound auth. Run deploy_gateway.sh first, then re-run this script."
+    echo "Step 0: WARNING — gateway_output.json missing Cognito details"
+    echo "  Deploying WITHOUT JWT inbound auth."
   fi
 else
   echo "Step 0: No gateway_output.json found — deploying WITHOUT JWT inbound auth."
-  echo "  To enable JWT auth, run deploy_gateway.sh first, then re-run this script."
 fi
 echo ""
 
@@ -102,15 +109,8 @@ if [[ -n "${AUTHORIZER_CONFIG_FLAG:-}" ]]; then
   echo "  JWT inbound authorization: ENABLED"
   echo "  The MCP runtime will only accept tokens from the Cognito User Pool."
 else
-  echo "  JWT inbound authorization: DISABLED (no gateway_output.json)"
+  echo "  JWT inbound authorization: DISABLED (no Cognito output files)"
 fi
 echo ""
 echo "Next steps:"
-if [[ -z "${AUTHORIZER_CONFIG_FLAG:-}" ]]; then
-  echo "  1. Run: bash scripts/deploy_gateway.sh"
-  echo "  2. Re-run: bash scripts/deploy_mcp.sh  (to enable JWT inbound auth)"
-  echo "  3. Run: bash scripts/deploy_agent.sh"
-else
-  echo "  1. Note the runtime ARN from the output above"
-  echo "  2. Run: bash scripts/deploy_agent.sh"
-fi
+echo "  1. Run: bash scripts/deploy_agent.sh"

@@ -20,10 +20,24 @@ Auth:
       GATEWAY_AUTH_CLIENT_SECRET — Cognito M2M client secret
       GATEWAY_AUTH_SCOPE         — OAuth scope (e.g. sage-mcp/tools)
 
+Phase 2 JWT tenant extraction:
+  When the incoming request carries an ``Authorization: Bearer <token>``
+  header, the agent decodes the JWT payload (without signature verification
+  — the AgentCore Runtime already validates the token) and extracts the
+  ``custom:tenant_id`` claim. The extracted value is then set as the
+  ``X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id`` header for
+  downstream gateway propagation.
+
+  Fallback (Phase 1 compatibility): if no JWT is present or the token
+  does not contain ``custom:tenant_id``, the agent reads the tenant ID
+  directly from the ``X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id``
+  request header (the Phase 1 mechanism).
+
 # Local verification (stdio fallback when GATEWAY_URL is not set):
 #   uv run python agent/agent.py
 """
 
+import base64
 import json
 import os
 import time
@@ -62,6 +76,47 @@ model = BedrockModel(
     model_id="us.anthropic.claude-3-5-sonnet-20241022-v2:0",
     region_name="us-east-1",
 )
+
+
+def _extract_tenant_from_jwt(authorization_header: str | None) -> str | None:
+    """Decode a JWT bearer token and extract the ``custom:tenant_id`` claim.
+
+    The AgentCore Runtime validates the JWT signature before the request
+    reaches this handler, so no signature verification is needed here.
+    We only need to base64-decode the payload segment.
+
+    Args:
+        authorization_header: Value of the ``Authorization`` header, e.g.
+            ``"Bearer eyJ..."``, or ``None`` if not present.
+
+    Returns:
+        The ``custom:tenant_id`` claim value (e.g. ``"axa"``), or ``None``
+        if the header is absent, malformed, or the claim is missing.
+    """
+    if not authorization_header:
+        return None
+
+    parts = authorization_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+
+    token = parts[1]
+    segments = token.split(".")
+    if len(segments) != 3:
+        return None
+
+    # Decode the payload segment (index 1); add padding as required
+    payload_b64 = segments[1]
+    padding = 4 - len(payload_b64) % 4
+    if padding != 4:
+        payload_b64 += "=" * padding
+
+    try:
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        claims = json.loads(payload_bytes)
+        return claims.get("custom:tenant_id") or None
+    except Exception:
+        return None
 
 
 def _get_gateway_token() -> str:
@@ -145,9 +200,17 @@ async def invoke(payload: dict, context: RequestContext):
     user_message = payload.get("prompt", "Hello")
 
     request_headers = context.request_headers or {}
-    tenant_id = request_headers.get(TENANT_HEADER) or request_headers.get(
-        TENANT_HEADER.lower()
+    # Phase 2: extract tenant_id from JWT custom:tenant_id claim
+    authorization = request_headers.get("authorization") or request_headers.get(
+        "Authorization"
     )
+    tenant_id = _extract_tenant_from_jwt(authorization)
+
+    # Phase 1 fallback: read tenant ID directly from the custom header
+    if not tenant_id:
+        tenant_id = request_headers.get(TENANT_HEADER) or request_headers.get(
+            TENANT_HEADER.lower()
+        )
 
     with _make_mcp_client(tenant_id) as mcp_client:
         tools = mcp_client.list_tools_sync()
