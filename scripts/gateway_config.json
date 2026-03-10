@@ -1,0 +1,35 @@
+{
+  "gatewayId": "sage-gateway",
+  "description": "Semantic routing gateway for Sage AI Assistant. Routes user queries to context tools (domain knowledge) and data tools (tenant-scoped data) via semantic search over tool descriptions.",
+  "region": "us-east-1",
+  "enableSemanticSearch": true,
+  "targets": [
+    {
+      "name": "sage-mcp-target",
+      "type": "MCP_SERVER",
+      "description": "FastMCP server hosting Sage's context tools (load_claims_workflow_context, load_premium_formulas_context) and data tools (get_product_info, get_claim_details).",
+      "endpointUri": "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/<url-encoded-mcp-runtime-arn>/invocations",
+      "credentialProviderConfigurations": [
+        {
+          "credentialProviderType": "OAUTH",
+          "credentialProvider": {
+            "oauthCredentialProvider": {
+              "providerArn": "<token-vault-credential-provider-arn>",
+              "grantType": "CLIENT_CREDENTIALS",
+              "scopes": ["sage-mcp/tools"]
+            }
+          }
+        }
+      ],
+      "metadataConfiguration": {
+        "allowedRequestHeaders": [
+          "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id"
+        ]
+      }
+    }
+  ],
+  "notes": {
+    "_auth_explanation": "AgentCore Gateway does NOT support GATEWAY_IAM_ROLE for MCP server targets. Only OAUTH (client credentials M2M) is supported. The deploy_gateway.sh script creates the Cognito resource server, M2M client, and AgentCore credential provider automatically.",
+    "_mcp_runtime_auth": "The MCP runtime must be deployed with JWT inbound authorization (deploy_mcp.sh handles this). The Cognito User Pool issues tokens that the MCP runtime validates."
+  }
+}
