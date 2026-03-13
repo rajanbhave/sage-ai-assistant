@@ -36,7 +36,7 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - [x] 3.6 Verify locally: ask Sage a claims question → agent invokes `load_claims_workflow_context` → skill content appears in response; ask a premium question → `load_premium_formulas_context` invoked
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 5.1, 5.2, 5.4, 6.1, 6.4, 6.5, 8.1_
 
-- [ ] 4. Context tools on AWS
+- [x] 4. Context tools on AWS
   - [x] 4.1 Create `scripts/deploy_mcp.sh` — deploys MCP server to AgentCore runtime using `agentcore launch` with appropriate environment variables
   - [x] 4.2 Create gateway configuration JSON file with `gatewayId: "sage-gateway"`, semantic search config, MCP server target with `metadataConfiguration.allowedRequestHeaders` for tenant header propagation
   - [x] 4.3 Create `scripts/deploy_gateway.sh` — creates/updates AgentCore Gateway from the configuration JSON, sets up Cognito resource server + M2M app client for OAuth client credentials auth, creates AgentCore credential provider (token vault), adds MCP server as gateway target with OAuth credential provider
@@ -62,12 +62,12 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - [x] 6.4 Verify all 4 demo scenarios from requirements: AXA premium query, Allianz premium query, AXA claim CLM-12345, Allianz claim CLM-5454
   - _Requirements: 3.3, 4.1, 4.2, 4.3, 4.4, 6.6, 8.3, 8.4, 9.6_
 
-- [ ] 7. Phase 2: JWT authentication
-  - [ ] 7.1 Create Cognito User Pool (`sage-tenant-pool`) with 2 app clients: `sage-axa-client` (custom attribute `tenant_id: axa`) and `sage-allianz-client` (custom attribute `tenant_id: allianz`), token claims include `custom:tenant_id`
-  - [ ] 7.2 Configure AgentCore Identity with credential provider for JWT validation from the Cognito User Pool
-  - [ ] 7.3 Update `agent/agent.py` to extract `tenant_id` from JWT `custom:tenant_id` claim when present, and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation (fallback to direct header for Phase 1 compatibility)
-  - [ ] 7.4 Update React frontend to authenticate against tenant-specific Cognito app client, obtain JWT, and send via `Authorization` header in the AgentCore Client's POST to `/invocations`
-  - [ ] 7.5 Verify: login as AXA user → JWT contains `custom:tenant_id: axa` → agent extracts tenant from JWT → data tools return AXA data; same for Allianz
+- [x] 7. Phase 2: JWT authentication
+  - [x] 7.1 Create Cognito User Pool (`sage-tenant-pool`) with 2 app clients: `sage-axa-client` (custom attribute `tenant_id: axa`) and `sage-allianz-client` (custom attribute `tenant_id: allianz`), token claims include `custom:tenant_id`
+  - [x] 7.2 Configure AgentCore Identity with credential provider for JWT validation from the Cognito User Pool
+  - [x] 7.3 Update `agent/agent.py` to extract `tenant_id` from JWT `custom:tenant_id` claim when present, and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation (fallback to direct header for Phase 1 compatibility)
+  - [x] 7.4 Update React frontend to authenticate against tenant-specific Cognito app client, obtain JWT, and send via `Authorization` header in the AgentCore Client's POST to `/invocations`
+  - [x] 7.5 Verify: login as AXA user → JWT contains `custom:tenant_id: axa` → agent extracts tenant from JWT → data tools return AXA data; same for Allianz
   - _Requirements: 12.Phase2.1, 12.Phase2.2, 12.Phase2.3, 12.Phase2.4_
 
 - [ ] 8. Phase 2: Bedrock Guardrails

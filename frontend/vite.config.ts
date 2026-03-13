@@ -10,6 +10,10 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  define: {
+    // amazon-cognito-identity-js expects Node.js `global` to exist
+    global: "globalThis",
+  },
   server: {
     // Proxy is only needed when running the agent locally (uv run python agent/agent.py).
     // When VITE_AGENT_URL points to the deployed AgentCore runtime, remove or comment these out.

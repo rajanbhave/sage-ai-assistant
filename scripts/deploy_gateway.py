@@ -359,10 +359,13 @@ def step7_gateway_target(
 def step8_save_outputs(
     gateway_arn: str, gateway_id: str, gateway_url: str, role_arn: str,
     mcp_arn: str, mcp_endpoint_uri: str, pool_id: str,
-    m2m_client_id: str, credential_provider_arn: str,
+    m2m_client_id: str, m2m_client_secret: str, credential_provider_arn: str,
 ) -> None:
     """Save all deployment outputs to gateway_output.json."""
     print("\nStep 8: Saving deployment outputs...")
+
+    domain_prefix = f"sage-mcp-{pool_id.split('_')[-1]}".lower()
+    token_endpoint = f"https://{domain_prefix}.auth.{REGION}.amazoncognito.com/oauth2/token"
 
     output = {
         "gatewayArn": gateway_arn,
@@ -374,6 +377,9 @@ def step8_save_outputs(
         "cognitoPoolId": pool_id,
         "cognitoResourceServerId": RESOURCE_SERVER_ID,
         "cognitoM2mClientId": m2m_client_id,
+        "cognitoM2mClientSecret": m2m_client_secret,
+        "cognitoTokenEndpoint": token_endpoint,
+        "cognitoScope": FULL_SCOPE,
         "credentialProviderArn": credential_provider_arn,
         "region": REGION,
     }
@@ -421,7 +427,7 @@ def main() -> None:
     step8_save_outputs(
         gateway_arn, gateway_id, gateway_url, role_arn,
         mcp_arn, mcp_endpoint_uri, pool_id,
-        m2m_client_id, credential_provider_arn,
+        m2m_client_id, m2m_client_secret, credential_provider_arn,
     )
 
     print("\n=== Gateway deployment complete ===\n")

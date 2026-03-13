@@ -10,7 +10,7 @@ The system comprises three layers: (1) context tools that load domain knowledge 
 
 This is an end-to-end demo showcasing the full flow from UI to AgentCore modules for two tenants: **AXA** and **Allianz**.
 
-- **Frontend**: React chat interface with tenant selector dropdown.
+- **Frontend**: React chat interface — login screen (Phase 2, active) or tenant selector dropdown (Phase 1 fallback).
 - **Agent SDK**: Strands SDK for building the Sage agent with tool use capabilities.
 - **Foundation Model**: Claude Sonnet 4.5 via Amazon Bedrock.
 - **Context Modules (shared across tenants)**: 2 context tools deployed in the MCP server that load skill Markdown as additional prompt context (similar to Claude Code skills). The AgentCore Gateway semantically routes queries to these tools:
@@ -156,7 +156,7 @@ The demo showcases two tenants with mock data:
 
 #### Acceptance Criteria
 
-1. THE React frontend SHALL provide a tenant selector (dropdown) allowing the user to choose a Tenant (AXA or Allianz) at session start.
+1. THE React frontend SHALL provide a login screen (Phase 2) or tenant selector dropdown (Phase 1 fallback) allowing the user to establish their tenant identity (AXA or Allianz) at session start.
 2. THE React frontend SHALL send the selected tenant identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` HTTP header with each request.
 3. THE Sage_Agent SHALL read the tenant identifier from the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` request header and associate the session with that Tenant.
 4. THE AgentCore_Gateway target SHALL be configured with `metadataConfiguration.allowedRequestHeaders` to propagate the tenant header to the MCP_Server.
@@ -196,7 +196,7 @@ The demo showcases two tenants with mock data:
 
 #### Acceptance Criteria
 
-1. THE demo SHALL provide a chat frontend built with React (agi-ui).
+1. THE demo SHALL provide a chat frontend built with React + Vite + Tailwind CSS + shadcn/ui.
 2. THE React frontend SHALL include a tenant selector dropdown with options for AXA and Allianz.
 3. THE React frontend SHALL pass the selected tenant identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` HTTP header with each request (Phase 1), or include it in the JWT token claims (Phase 2).
 4. THE React frontend SHALL send user messages to the Sage_Agent backend and display streamed responses.
@@ -219,21 +219,21 @@ The demo showcases two tenants with mock data:
 
 **User Story:** As a platform engineer, I want the demo to showcase both IAM authentication and JWT-based tenant authentication, so that the customer sees the progression from simple setup to production-ready tenant identity.
 
-#### Phase 1: IAM + OAuth M2M Authentication
+#### Phase 1: OAuth M2M Authentication (Gateway → MCP)
 
-1. THE AgentCore Runtime (agent) inbound auth SHALL use IAM authentication for client-to-runtime calls.
+1. THE AgentCore Runtime (agent) inbound auth SHALL use JWT authorization with `allowedClients` for Phase 1 (M2M `client_credentials` tokens from the M2M Cognito pool carry `client_id` but no `aud` claim).
 2. THE AgentCore Gateway inbound auth SHALL use IAM (SigV4) for agent-to-gateway calls.
 3. THE AgentCore Runtime IAM role SHALL include `bedrock-agentcore:InvokeGateway` permission for the gateway.
 4. THE Gateway outbound auth to MCP_Server targets SHALL use OAuth with client credentials grant (M2M). Note: AgentCore Gateway does not support IAM/SigV4 for MCP server targets — only OAuth is supported.
-5. THE MCP_Server runtime SHALL be configured with JWT inbound authorization, accepting tokens issued by a Cognito User Pool resource server.
+5. THE MCP_Server runtime SHALL be configured with JWT inbound authorization using `allowedClients`, accepting tokens issued by the M2M Cognito User Pool (`sage-mcp-pool`). `allowedClients` is required (not `allowedAudience`) because M2M `client_credentials` tokens carry `client_id` but no `aud` claim.
 6. A Cognito resource server and M2M app client (client credentials grant) SHALL be created for the Gateway-to-MCP authentication flow.
 7. An AgentCore credential provider (token vault entry) SHALL be created to store the M2M client credentials for the Gateway.
 8. THE tenant identifier SHALL be passed via the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` custom header from the React frontend.
 
-#### Phase 2: JWT Tenant Authentication
+#### Phase 2: JWT Tenant Authentication (Active)
 
-1. THE AgentCore Runtime inbound auth SHALL accept JWT bearer tokens containing tenant claims (e.g., `tenant_id` in the token payload).
-2. THE React frontend SHALL obtain a tenant-specific JWT token from a Cognito User Pool (configured with two app clients, one per tenant) and pass it via the `Authorization` header.
-3. THE Sage_Agent SHALL extract the tenant identifier from the JWT token claims and pass it to the AgentCore_Gateway as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for propagation to the MCP_Server. The custom header mechanism from Phase 1 is retained for gateway-to-MCP propagation; only the source of the tenant ID changes (JWT claims instead of client-set header).
-4. THE AgentCore Identity SHALL be configured with a credential provider for JWT token validation per tenant.
+1. THE AgentCore Runtime (agent) inbound auth SHALL accept Cognito ID tokens from the tenant user pool (`sage-tenant-pool`). The JWT authorizer SHALL use `allowedAudience` with the AXA and Allianz app client IDs — ID tokens carry `aud` = client ID.
+2. THE React frontend SHALL authenticate users against the tenant-specific Cognito app client (`sage-axa-client` or `sage-allianz-client`) using `USER_PASSWORD_AUTH` via `amazon-cognito-identity-js`, obtain an ID token containing `custom:tenant_id`, and send it via the `Authorization: Bearer` header on every `/invocations` request.
+3. THE Sage_Agent SHALL extract the tenant identifier from the JWT `custom:tenant_id` claim (base64-decoded payload, no signature verification needed — runtime already validated) and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation. Phase 1 direct-header fallback is retained for compatibility.
+4. THE tenant user pool SHALL be deployed via `scripts/deploy_user_pool.py`, which creates the pool, two app clients (one per tenant), and demo users (`axa-user`, `allianz-user`) with permanent passwords and `custom:tenant_id` attributes.
 5. THE Sage_Agent SHALL integrate Amazon Bedrock Guardrails for out-of-domain query handling, replacing the base prompt's static instruction with a managed guardrail policy.

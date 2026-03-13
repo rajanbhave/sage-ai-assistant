@@ -52,7 +52,23 @@ Two tenants: AXA and Allianz, with in-memory mock data. Four registered tools:
 
 ## Gateway & Runtime Authentication
 
-- AgentCore Gateway → MCP Runtime: OAuth M2M (`client_credentials` grant) via Cognito resource server. The MCP runtime uses `customJWTAuthorizer` with `allowedClients` (not `allowedAudience`) because Cognito M2M tokens carry `client_id` but no `aud` claim.
-- Frontend → Agent Runtime: same Cognito M2M token obtained via `scripts/get_token.py`. The agent runtime also uses `allowedClients` for the same reason.
-- `deploy_gateway.py` handles Cognito pool, domain, resource server, M2M client, credential provider, gateway, and target creation. `deploy_mcp.sh` and `deploy_agent.sh` configure JWT inbound auth on their respective runtimes.
-- To refresh the bearer token: `uv run python scripts/get_token.py` — auto-updates `frontend/.env.local`.
+Two separate Cognito pools, two separate token types:
+
+**Frontend → Agent Runtime (Phase 2 — active):**
+- User logs in via `amazon-cognito-identity-js` against the tenant user pool (`sage-tenant-pool`, `us-east-1_HyvBJ2onP`)
+- Cognito issues an ID token containing `custom:tenant_id` claim
+- Frontend sends `Authorization: Bearer <id_token>` on every `/invocations` request
+- Agent runtime uses `customJWTAuthorizer` with `allowedAudience` (ID tokens carry `aud` = client ID)
+- Agent decodes the JWT, extracts `custom:tenant_id`, and sets it as the downstream tenant header
+- Deployed via `scripts/deploy_user_pool.py` (creates pool + app clients + demo users); `deploy_agent.sh` reads `user_pool_output.json` to configure `allowedAudience`
+
+**Agent → Gateway → MCP Runtime (M2M, always):**
+- Agent fetches a `client_credentials` token from the M2M pool (`sage-mcp-pool`, `us-east-1_tAe4ATCTO`) using env vars injected by `deploy_agent.sh`
+- Gateway validates via its credential provider; MCP runtime uses `customJWTAuthorizer` with `allowedClients` (M2M tokens carry `client_id`, no `aud` claim)
+- `deploy_gateway.py` handles M2M pool, resource server, M2M client, credential provider, gateway, and target creation
+- `deploy_mcp.sh` configures the MCP runtime with JWT inbound auth pointing at the M2M pool
+
+**Phase 1 fallback (static token):**
+- When `VITE_COGNITO_*` vars are absent, the frontend uses `VITE_AGENT_BEARER_TOKEN` (M2M token)
+- Refresh with: `uv run python scripts/get_token.py` — auto-updates `frontend/.env.local`
+- Agent runtime falls back to `allowedClients` using the M2M pool

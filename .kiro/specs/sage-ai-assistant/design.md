@@ -29,7 +29,9 @@ Two demo tenants (AXA and Allianz) share domain skills but have isolated mock da
 | Mock data in-memory dicts | Sufficient for demo; easily swappable with real backends |
 | Custom React + SSE frontend (FAST pattern) | Direct SSE streaming from BedrockAgentCoreApp `/invocations`; no intermediate protocol layer; same endpoint works locally and on AgentCore; Cognito auth integrates naturally for Phase 2 |
 | Vite + Tailwind + shadcn | Lightweight, fast dev server, production-ready components; hostable on AWS Amplify Hosting |
-| JWT `allowedClients` (not `allowedAudience`) | Cognito M2M `client_credentials` tokens carry `client_id` claim but no `aud` claim — `allowedClients` is the correct validator |
+| JWT `allowedAudience` on agent runtime (Phase 2) | Cognito ID tokens carry `aud` = client ID — `allowedAudience` is correct for user-facing auth; Phase 1 fallback uses `allowedClients` with M2M pool |
+| JWT `allowedClients` on MCP runtime (always) | Gateway→MCP always uses M2M `client_credentials` tokens which carry `client_id` but no `aud` claim — `allowedClients` is the correct validator |
+| Two separate Cognito pools | `sage-tenant-pool` issues user ID tokens (Phase 2 frontend auth); `sage-mcp-pool` issues M2M tokens (Gateway→MCP). Never mix them. |
 
 ## Architecture
 
@@ -39,14 +41,23 @@ Two demo tenants (AXA and Allianz) share domain skills but have isolated mock da
 %%{init: {"flowchart": {"useMaxWidth": false}}}%%
 graph TB
     subgraph Frontend - React + Vite + Tailwind + shadcn
+        LS[Login Screen<br/>Phase 2 active]
         UI[Custom Chat UI<br/>ChatInterface + ChatMessage]
-        TS[Tenant Selector Dropdown]
         AC[AgentCore Client<br/>SSE Reader + Strands Parser]
     end
 
-    subgraph AgentCore Runtime
-        SA[Strands SDK Agent<br/>Sage Agent<br/>/invocations endpoint]
+    subgraph Cognito - sage-tenant-pool
+        CTP[Tenant User Pool<br/>sage-axa-client / sage-allianz-client<br/>issues ID tokens with custom:tenant_id]
+    end
+
+    subgraph AgentCore Runtime - Agent
+        SA[Strands SDK Agent<br/>Sage Agent<br/>/invocations endpoint<br/>allowedAudience: axaClientId, allianzClientId]
         BP[Base Prompt<br/>agent/prompts/system.md]
+        JD[JWT decode<br/>extract custom:tenant_id]
+    end
+
+    subgraph Cognito - sage-mcp-pool
+        M2M[M2M Pool<br/>client_credentials grant<br/>scope: sage-mcp/tools]
     end
 
     subgraph AgentCore Gateway
@@ -54,7 +65,7 @@ graph TB
         MC[metadataConfiguration<br/>allowedRequestHeaders]
     end
 
-    subgraph MCP Server - FastMCP
+    subgraph AgentCore Runtime - MCP Server FastMCP
         CT1[load_claims_workflow_context]
         CT2[load_premium_formulas_context]
         DT1[get_product_info]
@@ -71,14 +82,19 @@ graph TB
         MD2[Allianz Products & Claims]
     end
 
-    FM[Claude Sonnet 4.5<br/>Amazon Bedrock]
+    FM[Claude 3.5 Sonnet v2<br/>Amazon Bedrock]
 
+    LS -->|USER_PASSWORD_AUTH| CTP
+    CTP -->|ID token custom:tenant_id| LS
+    LS --> UI
     UI -->|User Input| AC
-    TS --> UI
-    AC -->|POST /invocations SSE<br/>+ Tenant Header| SA
+    AC -->|POST /invocations<br/>Authorization: Bearer id_token| SA
+    SA --> JD
     SA -->|System Prompt| BP
     SA <-->|LLM Calls| FM
-    SA -->|Semantic Search| GW
+    SA -->|client_credentials| M2M
+    M2M -->|M2M access token| SA
+    SA -->|Bearer m2m_token<br/>+ X-...-Tenant-Id header| GW
     GW -->|Tool Match + Header Propagation| SA
     SA -->|Tool Invocation| CT1
     SA -->|Tool Invocation| CT2
@@ -98,31 +114,42 @@ graph TB
 %%{init: {"sequence": {"useMaxWidth": false}}}%%
 sequenceDiagram
     participant User
+    participant LoginUI as Login Screen (React)
+    participant Cognito as Cognito sage-tenant-pool
     participant ChatUI as Chat UI (React + Tailwind)
     participant SSEClient as AgentCore Client (SSE)
     participant Agent as Strands Agent (Sage) /invocations
-    participant Bedrock as Claude Sonnet 4.5
+    participant CognitoM2M as Cognito sage-mcp-pool
+    participant Bedrock as Claude 3.5 Sonnet v2
     participant Gateway as AgentCore Gateway
     participant MCP as FastMCP Server
     participant Skills as Skill Files
     participant MockData as Mock Data Store
 
-    User->>ChatUI: Select tenant (AXA) + type query
-    ChatUI->>SSEClient: Send message + tenant ID
-    SSEClient->>Agent: POST /invocations + X-...-Tenant-Id: AXA
+    User->>LoginUI: Select tenant (AXA) + enter credentials
+    LoginUI->>Cognito: USER_PASSWORD_AUTH (sage-axa-client)
+    Cognito-->>LoginUI: ID token (custom:tenant_id = "axa")
+    LoginUI->>ChatUI: Session established (idToken, tenantId)
+
+    User->>ChatUI: Type query
+    ChatUI->>SSEClient: Send message + idToken + tenantId
+    SSEClient->>Agent: POST /invocations\nAuthorization: Bearer <id_token>\nX-...-Tenant-Id: axa
+    Agent->>Agent: Validate JWT (allowedAudience)\nDecode payload → custom:tenant_id = "axa"
     Agent->>Agent: Load base prompt from agent/prompts/system.md
+    Agent->>CognitoM2M: client_credentials grant (sage-mcp/tools)
+    CognitoM2M-->>Agent: M2M access token
     Agent->>Bedrock: Send [system_prompt + user_message]
-    Bedrock->>Agent: Tool use request (via gateway semantic search)
-    Agent->>Gateway: x_amz_bedrock_agentcore_search(query)
+    Bedrock->>Agent: Tool use request
+    Agent->>Gateway: x_amz_bedrock_agentcore_search(query)\nAuthorization: Bearer <m2m_token>\nX-...-Tenant-Id: axa
     Gateway->>Gateway: Semantic match against tool descriptions
     Gateway-->>Agent: Matched tools [load_premium_formulas_context, get_product_info]
-    Agent->>MCP: invoke load_premium_formulas_context()
+    Agent->>MCP: invoke load_premium_formulas_context()\nBearer <m2m_token> (allowedClients)
     MCP->>Skills: Read skills/premium_formulas.md
     Skills-->>MCP: Markdown content
     MCP-->>Agent: Domain context string
     Agent->>Bedrock: Send [system + user + domain_context]
     Bedrock->>Agent: Tool use request for get_product_info(product_type="motor")
-    Agent->>MCP: invoke get_product_info(product_type="motor") + Tenant-Id: AXA
+    Agent->>MCP: invoke get_product_info(product_type="motor")\nX-...-Tenant-Id: axa
     MCP->>MockData: Filter AXA motor products
     MockData-->>MCP: AXA motor product data
     MCP-->>Agent: Product info JSON
@@ -173,20 +200,31 @@ export type ChunkParser = (line: string, callback: StreamCallback) => void;
 
 const TENANT_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id";
 
+/**
+ * Phase 2: when jwtToken is provided it is sent as Authorization: Bearer <token>.
+ * The agent extracts custom:tenant_id from the JWT claims.
+ * Phase 1 fallback: uses VITE_AGENT_BEARER_TOKEN static env var.
+ */
 export async function invokeAgent(
   query: string,
   tenantId: string,
-  onEvent: StreamCallback
+  onEvent: StreamCallback,
+  jwtToken?: string   // Phase 2: Cognito ID token
 ): Promise<void> {
   const agentUrl = import.meta.env.VITE_AGENT_URL || "http://localhost:8080/invocations";
-  const bearerToken = import.meta.env.VITE_AGENT_BEARER_TOKEN;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     [TENANT_HEADER]: tenantId,
   };
-  if (bearerToken) {
-    headers["Authorization"] = `Bearer ${bearerToken}`;
+
+  if (jwtToken) {
+    // Phase 2: Cognito ID token — agent extracts tenant from claims
+    headers["Authorization"] = `Bearer ${jwtToken}`;
+  } else {
+    // Phase 1 fallback: static M2M bearer token from env
+    const bearerToken = import.meta.env.VITE_AGENT_BEARER_TOKEN;
+    if (bearerToken) headers["Authorization"] = `Bearer ${bearerToken}`;
   }
 
   const response = await fetch(agentUrl, {
@@ -501,12 +539,18 @@ MOCK_DATA = {
 ```mermaid
 graph LR
     subgraph User Layer
+        LS[Login Screen<br/>Cognito auth]
         UI[Chat UI<br/>React + Tailwind + shadcn]
         AC[AgentCore Client<br/>SSE Reader]
     end
 
+    subgraph Auth Layer
+        CTP[Cognito sage-tenant-pool<br/>ID tokens]
+        M2M[Cognito sage-mcp-pool<br/>M2M tokens]
+    end
+
     subgraph Agent Layer
-        EA[Sage Agent<br/>Strands SDK]
+        EA[Sage Agent<br/>Strands SDK<br/>allowedAudience]
         BP[Base Prompt]
     end
 
@@ -515,7 +559,7 @@ graph LR
     end
 
     subgraph Tool Layer
-        MCP[FastMCP Server]
+        MCP[FastMCP Server<br/>allowedClients]
     end
 
     subgraph Knowledge Layer
@@ -524,14 +568,19 @@ graph LR
     end
 
     subgraph Model Layer
-        FM[Claude Sonnet 4.5]
+        FM[Claude 3.5 Sonnet v2]
     end
 
+    LS -->|USER_PASSWORD_AUTH| CTP
+    CTP -->|ID token| LS
+    LS --> UI
     UI -->|User input| AC
-    AC -->|POST /invocations SSE<br/>+ tenant_id header| EA
+    AC -->|POST /invocations<br/>Bearer id_token| EA
     EA --> BP
     EA <--> FM
-    EA <--> GW
+    EA -->|client_credentials| M2M
+    M2M -->|M2M token| EA
+    EA <-->|Bearer m2m_token<br/>+ tenant header| GW
     GW <-->|header propagation| MCP
     MCP --> PB
     MCP --> MD
@@ -687,15 +736,19 @@ Header: X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id: axa|allianz
 
 ### Authentication Models
 
-#### Phase 1: IAM + OAuth M2M Authentication
+#### Phase 1: OAuth M2M Authentication (Gateway → MCP)
 
 ```
-Chat UI (React) → (SigV4 or Bearer Token) → AgentCore Runtime (Agent) → (SigV4) → AgentCore Gateway
-                                                                                        ↓
-                                                                              (OAuth M2M / Client Credentials)
-                                                                                        ↓
-                                                                                   MCP Server (JWT inbound auth)
-                                                                              + Tenant header propagation
+Chat UI (React) → (Bearer M2M token or JWT ID token) → AgentCore Runtime (Agent)
+                                                              ↓
+                                                    (OAuth M2M client_credentials)
+                                                              ↓
+                                                       AgentCore Gateway
+                                                              ↓
+                                                    (OAuth M2M client_credentials)
+                                                              ↓
+                                                         MCP Server (JWT inbound auth, allowedClients)
+                                                    + Tenant header propagation
 ```
 
 **Gateway → MCP Server auth flow:**

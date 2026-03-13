@@ -12,7 +12,7 @@ inclusion: always
 - **MCP server**: FastMCP with decorator-based tool registration (`@mcp.tool()`), runs on port 8000 with `stateless_http=True`
 - **Foundation model**: Amazon Bedrock — Claude Sonnet 4.5
 - **Hosting**: AgentCore Runtime (agent + MCP server), AgentCore Gateway (semantic routing)
-- **Auth**: Cognito M2M OAuth (frontend→agent, gateway→MCP), JWT `allowedClients` validation on both runtimes (not `allowedAudience` — Cognito M2M tokens carry `client_id` but no `aud` claim)
+- **Auth**: Two Cognito pools — `sage-tenant-pool` for user ID tokens (Phase 2, `allowedAudience` on agent runtime) and `sage-mcp-pool` for M2M tokens (Gateway→MCP, `allowedClients` on MCP runtime). Phase 1 fallback uses M2M token directly from frontend.
 
 ### Python code style
 
