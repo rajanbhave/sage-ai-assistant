@@ -1,0 +1,20 @@
+{
+  "registryArn": "arn:aws:bedrock-agentcore:us-east-1:434801484416:registry/Vcwe7shrFk5REXWQ",
+  "registryId": "Vcwe7shrFk5REXWQ",
+  "registryName": "sage-skills",
+  "region": "us-east-1",
+  "records": [
+    {
+      "name": "claims-workflow",
+      "recordArn": "arn:aws:bedrock-agentcore:us-east-1:434801484416:registry/Vcwe7shrFk5REXWQ/record/o2MS57mzeMrx",
+      "recordId": "o2MS57mzeMrx",
+      "status": "APPROVED"
+    },
+    {
+      "name": "premium-formulas",
+      "recordArn": "arn:aws:bedrock-agentcore:us-east-1:434801484416:registry/Vcwe7shrFk5REXWQ/record/y8Y3XkNPdENP",
+      "recordId": "y8Y3XkNPdENP",
+      "status": "APPROVED"
+    }
+  ]
+}

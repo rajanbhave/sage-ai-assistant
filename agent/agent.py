@@ -8,8 +8,15 @@ For each request the agent creates a short-lived MCPClient that connects
 to the AgentCore Gateway via Streamable HTTP, forwarding the tenant
 header so data tools can scope their responses to the correct tenant.
 
+Skills are loaded from the AgentCore Registry at startup. The agent
+fetches all approved AGENT_SKILLS records, creates Skill instances via
+``Skill.from_content()``, and passes them to the Strands ``AgentSkills``
+plugin. The plugin injects lightweight skill descriptors into the system
+prompt and provides a built-in ``skills`` tool for on-demand loading.
+
 Architecture:
   Frontend → Agent (AgentCore) → Gateway (AgentCore) → MCP Server (AgentCore)
+  Skills are fetched from AgentCore Registry at startup (IAM auth).
 
 Auth:
   Agent → Gateway: OAuth M2M token fetched from Cognito using the same
@@ -19,6 +26,9 @@ Auth:
       GATEWAY_AUTH_CLIENT_ID     — Cognito M2M client ID (same pool as MCP)
       GATEWAY_AUTH_CLIENT_SECRET — Cognito M2M client secret
       GATEWAY_AUTH_SCOPE         — OAuth scope (e.g. sage-mcp/tools)
+
+  Agent → Registry: IAM auth (uses the runtime's execution role).
+      SKILL_REGISTRY_ID          — AgentCore Registry ID for skill records
 
 Phase 2 JWT tenant extraction:
   When the incoming request carries an ``Authorization: Bearer <token>``
@@ -34,24 +44,29 @@ Phase 2 JWT tenant extraction:
   request header (the Phase 1 mechanism).
 
 # Local verification (stdio fallback when GATEWAY_URL is not set):
+#   export SKILL_REGISTRY_ID=<your-registry-id>
 #   uv run python agent/agent.py
 """
 
 import base64
 import json
+import logging
 import os
 import time
 from pathlib import Path
 
+import boto3
 import httpx
 from bedrock_agentcore.runtime import BedrockAgentCoreApp, RequestContext
 from mcp.client.streamable_http import streamablehttp_client
-from strands import Agent
+from strands import Agent, AgentSkills, Skill
 from strands.models.bedrock import BedrockModel
 from strands.tools.mcp import MCPClient
 
 from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+logger = logging.getLogger(__name__)
 
 app = BedrockAgentCoreApp()
 
@@ -63,6 +78,8 @@ GATEWAY_AUTH_TOKEN_ENDPOINT = os.environ.get("GATEWAY_AUTH_TOKEN_ENDPOINT")
 GATEWAY_AUTH_CLIENT_ID = os.environ.get("GATEWAY_AUTH_CLIENT_ID")
 GATEWAY_AUTH_CLIENT_SECRET = os.environ.get("GATEWAY_AUTH_CLIENT_SECRET")
 GATEWAY_AUTH_SCOPE = os.environ.get("GATEWAY_AUTH_SCOPE")
+SKILL_REGISTRY_ID = os.environ.get("SKILL_REGISTRY_ID")
+REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 # Simple in-process token cache: (token, expiry_timestamp)
 _token_cache: tuple[str, float] | None = None
@@ -73,9 +90,85 @@ def _load_base_prompt() -> str:
 
 
 model = BedrockModel(
-    model_id="us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+    model_id="us.anthropic.claude-sonnet-4-6",
     region_name="us-east-1",
 )
+
+
+def _fetch_skills_from_registry(registry_id: str) -> list[Skill]:
+    """Fetch all approved AGENT_SKILLS records from the AgentCore Registry.
+
+    Connects to the Registry via IAM auth, lists all approved skill
+    records, fetches the full SKILL.md content for each, and creates
+    ``Skill`` instances via ``Skill.from_content()``.
+
+    Args:
+        registry_id: The AgentCore Registry ID to fetch from.
+
+    Returns:
+        List of ``Skill`` instances ready for the ``AgentSkills`` plugin.
+    """
+    client = boto3.client("bedrock-agentcore-control", region_name=REGION)
+
+    # List all approved AGENT_SKILLS records
+    records = []
+    next_token = None
+    while True:
+        kwargs: dict = {
+            "registryId": registry_id,
+            "descriptorType": "AGENT_SKILLS",
+            "status": "APPROVED",
+        }
+        if next_token:
+            kwargs["nextToken"] = next_token
+        resp = client.list_registry_records(**kwargs)
+        records.extend(resp.get("registryRecords", []))
+        next_token = resp.get("nextToken")
+        if not next_token:
+            break
+
+    logger.info("Found %d approved AGENT_SKILLS records in registry %s", len(records), registry_id)
+
+    # Fetch full content for each record and create Skill instances
+    skills: list[Skill] = []
+    for record in records:
+        record_id = record["recordId"]
+        record_name = record.get("name", record_id)
+        try:
+            full = client.get_registry_record(
+                registryId=registry_id,
+                recordId=record_id,
+            )
+            descriptors = full.get("descriptors", {})
+            agent_skills = descriptors.get("agentSkills", {})
+            skill_md = agent_skills.get("skillMd", {})
+            content = skill_md.get("inlineContent", "")
+
+            if not content:
+                logger.warning("Record %s (%s) has no skillMd content, skipping", record_id, record_name)
+                continue
+
+            skill = Skill.from_content(content)
+            skills.append(skill)
+            logger.info("Loaded skill from registry: %s", skill.name)
+        except Exception as e:
+            logger.warning("Failed to load skill record %s (%s): %s", record_id, record_name, e)
+
+    return skills
+
+
+# Initialize the AgentSkills plugin once at module level.
+# Skills are fetched from the AgentCore Registry (SKILL_REGISTRY_ID).
+if not SKILL_REGISTRY_ID:
+    raise RuntimeError(
+        "SKILL_REGISTRY_ID environment variable is required. "
+        "Run 'uv run python scripts/deploy_registry.py' to create the registry, "
+        "then set SKILL_REGISTRY_ID to the registry ID."
+    )
+
+_skills = _fetch_skills_from_registry(SKILL_REGISTRY_ID)
+logger.info("AgentSkills plugin initialized with %d skills from registry", len(_skills))
+_skills_plugin = AgentSkills(skills=_skills)
 
 
 def _extract_tenant_from_jwt(authorization_header: str | None) -> str | None:
@@ -217,6 +310,7 @@ async def invoke(payload: dict, context: RequestContext):
         agent = Agent(
             model=model,
             system_prompt=_load_base_prompt(),
+            plugins=[_skills_plugin],
             tools=tools,
         )
         async for event in agent.stream_async(user_message):

@@ -1,3 +1,8 @@
+---
+name: premium-formulas
+description: Premium calculation formulas, pricing factors, discount rules, and rate tables.
+allowed-tools: get_product_info
+---
 # Premium Calculation Formulas and Rules
 
 ## Overview

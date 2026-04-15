@@ -1,3 +1,8 @@
+---
+name: claims-workflow
+description: Claims processing workflows, filing procedures, status tracking, and SLAs.
+allowed-tools: get_claim_details
+---
 # Claims Processing Workflow
 
 ## Overview

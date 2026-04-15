@@ -25,6 +25,7 @@ REGION="${AWS_REGION:-us-east-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GATEWAY_OUTPUT_FILE="$SCRIPT_DIR/gateway_output.json"
+REGISTRY_OUTPUT_FILE="$SCRIPT_DIR/registry_output.json"
 
 echo "=== Deploying Sage Agent to AgentCore Runtime ==="
 echo "Region: $REGION"
@@ -94,6 +95,7 @@ GATEWAY_AUTH_TOKEN_ENDPOINT=""
 GATEWAY_AUTH_CLIENT_ID=""
 GATEWAY_AUTH_CLIENT_SECRET=""
 GATEWAY_AUTH_SCOPE=""
+SKILL_REGISTRY_ID=""
 
 if [[ -f "$GATEWAY_OUTPUT_FILE" ]]; then
   GATEWAY_URL=$(jq -r '.gatewayUrl // empty' "$GATEWAY_OUTPUT_FILE" 2>/dev/null || true)
@@ -104,6 +106,10 @@ if [[ -f "$GATEWAY_OUTPUT_FILE" ]]; then
   GATEWAY_AUTH_SCOPE=$(jq -r '.cognitoScope // empty' "$GATEWAY_OUTPUT_FILE" 2>/dev/null || true)
 fi
 
+if [[ -f "$REGISTRY_OUTPUT_FILE" ]]; then
+  SKILL_REGISTRY_ID=$(jq -r '.registryId // empty' "$REGISTRY_OUTPUT_FILE" 2>/dev/null || true)
+fi
+
 if [[ -n "$GATEWAY_URL" ]]; then
   echo "Step 1: Gateway URL:            $GATEWAY_URL"
   echo "        Auth token endpoint:    $GATEWAY_AUTH_TOKEN_ENDPOINT"
@@ -111,6 +117,12 @@ if [[ -n "$GATEWAY_URL" ]]; then
   echo "        Auth scope:             $GATEWAY_AUTH_SCOPE"
 else
   echo "Step 1: WARNING — no gatewayUrl in gateway_output.json; agent will use stdio fallback"
+fi
+
+if [[ -n "$SKILL_REGISTRY_ID" ]]; then
+  echo "        Skill Registry ID:      $SKILL_REGISTRY_ID"
+else
+  echo "        WARNING — no registryId in registry_output.json; agent will fail to start"
 fi
 echo ""
 
@@ -144,6 +156,9 @@ if [[ -n "$GATEWAY_URL" ]]; then
   ENV_FLAGS+=(--env "GATEWAY_AUTH_CLIENT_ID=${GATEWAY_AUTH_CLIENT_ID}")
   ENV_FLAGS+=(--env "GATEWAY_AUTH_CLIENT_SECRET=${GATEWAY_AUTH_CLIENT_SECRET}")
   ENV_FLAGS+=(--env "GATEWAY_AUTH_SCOPE=${GATEWAY_AUTH_SCOPE}")
+fi
+if [[ -n "$SKILL_REGISTRY_ID" ]]; then
+  ENV_FLAGS+=(--env "SKILL_REGISTRY_ID=${SKILL_REGISTRY_ID}")
 fi
 uv run agentcore launch ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"}
 
