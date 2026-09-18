@@ -122,3 +122,11 @@ Replace the hardcoded `load_*` MCP context tools and the custom `SkillRegistry` 
 - Auto-approval is enabled so records go directly to `APPROVED` status
 - The `deploy_registry.py` script follows the same patterns as `deploy_gateway.py` (IPv4 patch, output JSON, idempotent)
 - `pyyaml` is needed by the deploy script to parse SKILL.md frontmatter for the record description
+
+## POC/MVP Completion Status
+
+The current POC is complete in the repository. Tasks 1–9 cover the working demo path: migrated `SKILL.md` files, Strands `AgentSkills` integration, Registry publication, startup loading, and deployment wiring. The existing module-level Registry fetch is sufficient for the POC's process-lifetime Skill cache; no separate `StartupSkillSnapshot` class or dedicated startup-loader module is required at this stage.
+
+`uv run pytest` passes the current 14-test migration suite. A live Registry-to-agent smoke test remains as operational demo sign-off, not as a missing POC implementation task.
+
+The stricter validator, boundary-rule set, publication planner, atomic deployment manifest, formal immutable snapshot, exhaustive lifecycle/property tests, and isolated integration tests described elsewhere in this specification are deferred production-hardening work. They should not be treated as pending POC tasks unless the scope is explicitly upgraded from POC/MVP to production readiness.

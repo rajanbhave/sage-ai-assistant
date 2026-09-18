@@ -1,43 +1,45 @@
 #!/usr/bin/env python3
-"""Create the Phase 2 Cognito User Pool for tenant JWT authentication.
+"""Configure two existing Cognito pools for Sage access-token issuance.
 
-Creates a Cognito User Pool named ``sage-tenant-pool`` with a custom
-attribute ``custom:tenant_id``, then creates two app clients:
+The script never creates a user pool. It first verifies both existing pools,
+their active feature plans, and their active V2_0 pre-token-generation
+customizers. Only after both lanes pass preflight does it create Sage
+resource scopes and one public browser client per pool.
 
-  - ``sage-axa-client``     — pre-seeded with tenant_id = "axa"
-  - ``sage-allianz-client`` — pre-seeded with tenant_id = "allianz"
+Required environment variables for each ``TENANT_A`` and ``TENANT_B`` prefix:
 
-Both clients use the USER_PASSWORD_AUTH flow so the React frontend can
-authenticate directly via the Cognito Identity SDK without a hosted UI.
-The ``custom:tenant_id`` attribute is included in the ID token claims via
-a pre-token-generation Lambda trigger (or read-only attribute mapping).
+- ``<prefix>_USER_POOL_ID``
+- ``<prefix>_PRE_TOKEN_LAMBDA_ARN`` (qualified alias/version ARN)
+- ``<prefix>_PRE_TOKEN_LAMBDA_CODE_SHA256``
+- ``<prefix>_TRUSTED_ASSIGNMENT_ATTRIBUTE``
+- ``<prefix>_AGENT_RUNTIME_ENDPOINT``
+- ``<prefix>_APPROVED_ACCESS_TOKEN_VALIDITY``
+- ``<prefix>_APPROVED_ACCESS_TOKEN_VALIDITY_UNIT``
+- ``<prefix>_TOKEN_LIFETIME_APPROVAL_REFERENCE``
 
-Outputs are saved to ``scripts/user_pool_output.json`` for use by
-``deploy_agent.sh`` (JWT inbound auth) and the React frontend.
-
-Usage:
-  uv run python scripts/deploy_user_pool.py
-
-Prerequisites:
-  - AWS credentials configured (aws configure)
-  - uv environment activated (source .venv/bin/activate)
+The approved validity value has no default. Its deployed value and unit must
+match the customer-approved input exactly.
 """
+
+from __future__ import annotations
 
 import json
 import os
 import socket
 import sys
-import time
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 # Force IPv4 — macOS often resolves AWS endpoints to IPv6 but the route hangs.
 _orig_getaddrinfo = socket.getaddrinfo
 
 
-def _ipv4_getaddrinfo(*args, **kwargs):
+def _ipv4_getaddrinfo(*args: Any, **kwargs: Any) -> list[tuple[Any, ...]]:
     """Prefer IPv4 addresses to avoid macOS IPv6 routing issues."""
     results = _orig_getaddrinfo(*args, **kwargs)
-    ipv4 = [r for r in results if r[0] == socket.AF_INET]
+    ipv4 = [result for result in results if result[0] == socket.AF_INET]
     return ipv4 if ipv4 else results
 
 
@@ -45,372 +47,489 @@ socket.getaddrinfo = _ipv4_getaddrinfo
 
 import boto3
 
-# ── Configuration ─────────────────────────────────────────────────────
+from sage_identity import load_access_token_customizer_configuration
 
 REGION = os.environ.get("AWS_REGION", "us-east-1")
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_FILE = SCRIPT_DIR / "user_pool_output.json"
+CANONICAL_TENANT_CLAIM_NAME = "custom:tenant_id"
+LANE_IDS = ("Tenant_A", "Tenant_B")
+SUPPORTED_ACCESS_TOKEN_TIERS = frozenset({"ESSENTIALS", "PLUS"})
+PUBLIC_AUTH_FLOWS = (
+    "ALLOW_USER_SRP_AUTH",
+    "ALLOW_USER_PASSWORD_AUTH",
+    "ALLOW_REFRESH_TOKEN_AUTH",
+)
+TOKEN_VALIDITY_UNITS = frozenset({"seconds", "minutes", "hours", "days"})
+RESOURCE_SERVERS: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+    ("sage-agent", "Sage Agent", (("invoke", "Invoke the Sage Agent"),)),
+    ("sage-gateway", "Sage Gateway", (("invoke", "Invoke the Sage Gateway"),)),
+    ("sage-mcp", "Sage MCP", (("invoke", "Invoke Sage MCP tools"),)),
+    (
+        "sage-api",
+        "Sage API",
+        (("read", "Read tenant data"), ("write", "Change tenant data")),
+    ),
+)
+SAGE_SCOPES = tuple(
+    f"{identifier}/{scope_name}"
+    for identifier, _, scopes in RESOURCE_SERVERS
+    for scope_name, _ in scopes
+)
 
-POOL_NAME = "sage-tenant-pool"
-AXA_CLIENT_NAME = "sage-axa-client"
-ALLIANZ_CLIENT_NAME = "sage-allianz-client"
-DOMAIN_PREFIX_BASE = "sage-tenant"
+
+@dataclass(frozen=True, slots=True)
+class LaneInput:
+    """Customer-approved deployment inputs for one fixed tenant lane."""
+
+    lane_id: str
+    tenant_id: str
+    user_pool_id: str
+    client_name: str
+    expected_tenant_claim: str
+    trusted_assignment_attribute: str
+    pre_token_lambda_arn: str
+    pre_token_lambda_code_sha256: str
+    agent_runtime_endpoint: str
+    approved_access_token_validity: int
+    approved_access_token_validity_unit: str
+    token_lifetime_approval_reference: str
 
 
-def load_previous_output() -> dict:
-    """Load previously saved user pool output if it exists.
+@dataclass(frozen=True, slots=True)
+class LanePreflight:
+    """Read-only evidence captured before any Cognito mutation."""
 
-    Returns:
-        Previously saved output dict, or empty dict if not found.
-    """
-    if OUTPUT_FILE.exists():
+    lane: LaneInput
+    feature_plan: str
+    pre_token_lambda_arn: str
+    pre_token_lambda_version: str
+    pre_token_lambda_code_sha256: str
+    existing_client_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedLaneRecord:
+    """Immutable browser trust record emitted for one tenant lane."""
+
+    laneId: str
+    tenantId: str
+    userPoolId: str
+    issuer: str
+    discoveryUrl: str
+    frontendClientIds: tuple[str, ...]
+    agentRuntimeEndpoint: str
+    expectedTenantClaim: str
+    trustedAssignmentSource: str
+
+
+@dataclass(frozen=True, slots=True)
+class TokenLifetimeEvidence:
+    """Machine-readable approved and active access-token lifetime evidence."""
+
+    laneId: str
+    activeValue: int
+    activeUnit: str
+    documentedValue: int
+    documentedUnit: str
+    approvalReference: str
+
+
+def _required(environment: Mapping[str, str], name: str) -> str:
+    value = environment.get(name, "").strip()
+    if not value:
+        raise ValueError(f"missing required configuration: {name}")
+    return value
+
+
+def load_lane_inputs(environment: Mapping[str, str] = os.environ) -> tuple[LaneInput, ...]:
+    """Load exactly the two fixed lane records from trusted deployment input."""
+    lanes: list[LaneInput] = []
+    for lane_id in LANE_IDS:
+        prefix = lane_id.upper()
+        validity_text = _required(
+            environment, f"{prefix}_APPROVED_ACCESS_TOKEN_VALIDITY"
+        )
         try:
-            return json.loads(OUTPUT_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-def step1_user_pool(cognito: object, prev: dict) -> str:
-    """Create or reuse the ``sage-tenant-pool`` Cognito User Pool.
-
-    The pool includes a custom attribute ``custom:tenant_id`` that is
-    mutable and included in ID token claims.
-
-    Args:
-        cognito: Boto3 Cognito IDP client.
-        prev: Previously saved output dict.
-
-    Returns:
-        User Pool ID string.
-    """
-    print("\nStep 1: Setting up Cognito User Pool...")
-
-    saved_id = prev.get("userPoolId")
-    if saved_id:
-        print(f"  Reusing pool from user_pool_output.json: {saved_id}")
-        return saved_id
-
-    # Check if pool already exists
-    resp = cognito.list_user_pools(MaxResults=60)
-    for pool in resp.get("UserPools", []):
-        if pool["Name"] == POOL_NAME:
-            print(f"  Found existing pool: {pool['Id']}")
-            return pool["Id"]
-
-    print(f"  Creating new User Pool: {POOL_NAME}")
-    resp = cognito.create_user_pool(
-        PoolName=POOL_NAME,
-        Schema=[
-            {
-                "Name": "tenant_id",
-                "AttributeDataType": "String",
-                "Mutable": True,
-                "Required": False,
-                "StringAttributeConstraints": {
-                    "MinLength": "1",
-                    "MaxLength": "64",
-                },
-            }
-        ],
-        # Allow users to sign in with username
-        UsernameAttributes=[],
-        # Auto-verify email (not required for M2M / client_credentials)
-        AutoVerifiedAttributes=[],
-        # Password policy — relaxed for demo
-        Policies={
-            "PasswordPolicy": {
-                "MinimumLength": 8,
-                "RequireUppercase": False,
-                "RequireLowercase": False,
-                "RequireNumbers": False,
-                "RequireSymbols": False,
-            }
-        },
-    )
-    pool_id = resp["UserPool"]["Id"]
-    print(f"  Created User Pool: {pool_id}")
-    return pool_id
-
-
-def step2_cognito_domain(cognito: object, pool_id: str, prev: dict) -> str:
-    """Create a Cognito hosted UI domain for the tenant pool.
-
-    Args:
-        cognito: Boto3 Cognito IDP client.
-        pool_id: User Pool ID.
-        prev: Previously saved output dict.
-
-    Returns:
-        Domain prefix string.
-    """
-    saved_domain = prev.get("cognitoDomain")
-    if saved_domain:
-        print(f"\nStep 2: Reusing Cognito domain: {saved_domain}")
-        return saved_domain
-
-    domain_prefix = f"{DOMAIN_PREFIX_BASE}-{pool_id.split('_')[-1]}".lower()
-    print(f"\nStep 2: Setting up Cognito domain: {domain_prefix}")
-
-    try:
-        cognito.create_user_pool_domain(Domain=domain_prefix, UserPoolId=pool_id)
-        print("  Created domain.")
-    except cognito.exceptions.InvalidParameterException:
-        print("  Domain already exists, continuing...")
-    except Exception as e:
-        print(f"  Domain setup note: {e}")
-
-    return domain_prefix
-
-
-def step3_app_client(
-    cognito: object,
-    pool_id: str,
-    client_name: str,
-    tenant_id_value: str,
-    prev_client_id: str | None,
-) -> tuple[str, str]:
-    """Create or reuse a Cognito app client for a specific tenant.
-
-    The client uses USER_PASSWORD_AUTH so the React frontend can
-    authenticate directly. The ``custom:tenant_id`` attribute is set
-    on users created for this client.
-
-    Args:
-        cognito: Boto3 Cognito IDP client.
-        pool_id: User Pool ID.
-        client_name: App client name (e.g. "sage-axa-client").
-        tenant_id_value: Tenant ID value (e.g. "axa").
-        prev_client_id: Previously saved client ID, or None.
-
-    Returns:
-        Tuple of (client_id, client_secret).
-    """
-    print(f"\nStep 3/{client_name}: Setting up app client '{client_name}'...")
-
-    if prev_client_id:
-        print(f"  Reusing existing client: {prev_client_id}")
-        try:
-            desc = cognito.describe_user_pool_client(
-                UserPoolId=pool_id, ClientId=prev_client_id
+            validity = int(validity_text)
+        except ValueError as error:
+            raise ValueError(
+                f"{prefix}_APPROVED_ACCESS_TOKEN_VALIDITY must be an integer"
+            ) from error
+        if validity <= 0:
+            raise ValueError(
+                f"{prefix}_APPROVED_ACCESS_TOKEN_VALIDITY must be positive"
             )
-            secret = desc["UserPoolClient"].get("ClientSecret", "")
-            return prev_client_id, secret
-        except Exception:
-            print("  Could not describe saved client — will recreate.")
-
-    # Check if client already exists
-    resp = cognito.list_user_pool_clients(UserPoolId=pool_id, MaxResults=60)
-    for c in resp.get("UserPoolClients", []):
-        if c["ClientName"] == client_name:
-            client_id = c["ClientId"]
-            print(f"  Found existing client: {client_id}")
-            desc = cognito.describe_user_pool_client(
-                UserPoolId=pool_id, ClientId=client_id
+        validity_unit = _required(
+            environment, f"{prefix}_APPROVED_ACCESS_TOKEN_VALIDITY_UNIT"
+        ).lower()
+        if validity_unit not in TOKEN_VALIDITY_UNITS:
+            raise ValueError(
+                f"{prefix}_APPROVED_ACCESS_TOKEN_VALIDITY_UNIT is invalid"
             )
-            secret = desc["UserPoolClient"].get("ClientSecret", "")
-            return client_id, secret
+        suffix = lane_id[-1].lower()
+        lanes.append(
+            LaneInput(
+                lane_id=lane_id,
+                tenant_id=lane_id,
+                user_pool_id=_required(environment, f"{prefix}_USER_POOL_ID"),
+                client_name=f"sage-tenant-{suffix}-client",
+                expected_tenant_claim=lane_id,
+                trusted_assignment_attribute=_required(
+                    environment, f"{prefix}_TRUSTED_ASSIGNMENT_ATTRIBUTE"
+                ),
+                pre_token_lambda_arn=_required(
+                    environment, f"{prefix}_PRE_TOKEN_LAMBDA_ARN"
+                ),
+                pre_token_lambda_code_sha256=_required(
+                    environment, f"{prefix}_PRE_TOKEN_LAMBDA_CODE_SHA256"
+                ),
+                agent_runtime_endpoint=_required(
+                    environment, f"{prefix}_AGENT_RUNTIME_ENDPOINT"
+                ),
+                approved_access_token_validity=validity,
+                approved_access_token_validity_unit=validity_unit,
+                token_lifetime_approval_reference=_required(
+                    environment, f"{prefix}_TOKEN_LIFETIME_APPROVAL_REFERENCE"
+                ),
+            )
+        )
+    _validate_lane_inputs(tuple(lanes))
+    return tuple(lanes)
 
-    print(f"  Creating app client: {client_name} (tenant_id={tenant_id_value})")
-    resp = cognito.create_user_pool_client(
-        UserPoolId=pool_id,
-        ClientName=client_name,
-        GenerateSecret=False,  # Public client — no secret needed for SPA
-        ExplicitAuthFlows=[
-            "ALLOW_USER_SRP_AUTH",
-            "ALLOW_USER_PASSWORD_AUTH",
-            "ALLOW_REFRESH_TOKEN_AUTH",
-        ],
-        # Read/write access to custom:tenant_id
-        ReadAttributes=["custom:tenant_id", "email"],
-        WriteAttributes=["custom:tenant_id", "email"],
-        # Token validity
-        AccessTokenValidity=1,
-        IdTokenValidity=1,
-        RefreshTokenValidity=30,
-        TokenValidityUnits={
-            "AccessToken": "hours",
-            "IdToken": "hours",
-            "RefreshToken": "days",
-        },
-    )
-    client_id = resp["UserPoolClient"]["ClientId"]
-    secret = resp["UserPoolClient"].get("ClientSecret", "")
-    print(f"  Created app client: {client_id}")
-    return client_id, secret
+
+def _validate_lane_inputs(lanes: tuple[LaneInput, ...]) -> None:
+    if len(lanes) != 2 or {lane.lane_id for lane in lanes} != set(LANE_IDS):
+        raise ValueError("configuration must contain exactly Tenant_A and Tenant_B")
+    if any(lane.lane_id != lane.tenant_id for lane in lanes):
+        raise ValueError("each lane must bind its matching tenant")
+    for field_name in ("user_pool_id", "agent_runtime_endpoint", "expected_tenant_claim"):
+        if len({getattr(lane, field_name) for lane in lanes}) != 2:
+            raise ValueError(f"lane {field_name} values must be distinct")
 
 
-def step4_demo_users(
-    cognito: object,
-    pool_id: str,
-    axa_client_id: str,
-    allianz_client_id: str,
-) -> None:
-    """Create demo users for AXA and Allianz tenants.
-
-    Creates:
-      - axa-user / AXApassword1  (custom:tenant_id = "axa")
-      - allianz-user / Allianzpassword1  (custom:tenant_id = "allianz")
-
-    Args:
-        cognito: Boto3 Cognito IDP client.
-        pool_id: User Pool ID.
-        axa_client_id: AXA app client ID (unused — users are pool-level).
-        allianz_client_id: Allianz app client ID (unused).
-    """
-    print("\nStep 4: Creating demo users...")
-
-    demo_users = [
-        {
-            "username": "axa-user",
-            "password": "AXApassword1",
-            "tenant_id": "axa",
-        },
-        {
-            "username": "allianz-user",
-            "password": "Allianzpassword1",
-            "tenant_id": "allianz",
-        },
+def _list_items(cognito: Any, operation: str, result_key: str, **kwargs: Any) -> list[dict[str, Any]]:
+    paginator = cognito.get_paginator(operation)
+    return [
+        item
+        for page in paginator.paginate(**kwargs)
+        for item in page.get(result_key, [])
     ]
 
-    for user in demo_users:
-        username = user["username"]
-        password = user["password"]
-        tenant_id = user["tenant_id"]
 
-        try:
-            cognito.admin_create_user(
-                UserPoolId=pool_id,
-                Username=username,
-                TemporaryPassword=password,
-                UserAttributes=[
-                    {"Name": "custom:tenant_id", "Value": tenant_id},
-                ],
-                MessageAction="SUPPRESS",  # Don't send welcome email
-            )
-            print(f"  Created user: {username} (tenant_id={tenant_id})")
+def _inspect_existing_client(cognito: Any, lane: LaneInput) -> str | None:
+    matches = [
+        client
+        for client in _list_items(
+            cognito,
+            "list_user_pool_clients",
+            "UserPoolClients",
+            UserPoolId=lane.user_pool_id,
+        )
+        if client.get("ClientName") == lane.client_name
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"{lane.lane_id} has duplicate Sage public clients")
+    if not matches:
+        return None
 
-            # Set permanent password (skip FORCE_CHANGE_PASSWORD state)
-            cognito.admin_set_user_password(
-                UserPoolId=pool_id,
-                Username=username,
-                Password=password,
-                Permanent=True,
-            )
-            print(f"  Set permanent password for: {username}")
+    client_id = matches[0].get("ClientId")
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError(f"{lane.lane_id} public client has no client ID")
+    client = cognito.describe_user_pool_client(
+        UserPoolId=lane.user_pool_id, ClientId=client_id
+    )["UserPoolClient"]
+    units = client.get("TokenValidityUnits", {})
+    if (
+        client.get("ClientSecret")
+        or set(client.get("ExplicitAuthFlows", [])) != set(PUBLIC_AUTH_FLOWS)
+        or lane.trusted_assignment_attribute not in client.get("ReadAttributes", [])
+        or lane.trusted_assignment_attribute in client.get("WriteAttributes", [])
+        or "client_credentials" in client.get("AllowedOAuthFlows", [])
+        or client.get("AccessTokenValidity")
+        != lane.approved_access_token_validity
+        or units.get("AccessToken")
+        != lane.approved_access_token_validity_unit
+    ):
+        raise ValueError(
+            f"{lane.lane_id} existing client is not the approved Sage public client"
+        )
+    return client_id
 
-        except cognito.exceptions.UsernameExistsException:
-            print(f"  User already exists: {username}")
-            # Update tenant_id attribute in case it changed
-            try:
-                cognito.admin_update_user_attributes(
-                    UserPoolId=pool_id,
-                    Username=username,
-                    UserAttributes=[
-                        {"Name": "custom:tenant_id", "Value": tenant_id},
-                    ],
-                )
-                print(f"  Updated tenant_id for: {username}")
-            except Exception as e:
-                print(f"  Warning: Could not update {username}: {e}")
+
+def _verify_pre_token_customizer(
+    lambda_client: Any,
+    lane: LaneInput,
+    existing_client_id: str | None,
+) -> str:
+    arn_parts = lane.pre_token_lambda_arn.split(":")
+    if (
+        len(arn_parts) != 8
+        or arn_parts[2] != "lambda"
+        or arn_parts[5] != "function"
+        or not arn_parts[7]
+        or arn_parts[7] == "$LATEST"
+    ):
+        raise ValueError(
+            f"{lane.lane_id} pre-token Lambda ARN must use an immutable version or alias"
+        )
+
+    response = lambda_client.get_function(FunctionName=lane.pre_token_lambda_arn)
+    configuration = response.get("Configuration", {})
+    code_sha256 = configuration.get("CodeSha256")
+    if (
+        configuration.get("Handler") != "sage_identity.cognito.lambda_handler"
+        or configuration.get("Version") == "$LATEST"
+        or code_sha256 != lane.pre_token_lambda_code_sha256
+    ):
+        raise ValueError(
+            f"{lane.lane_id} pre-token Lambda code identity is not approved"
+        )
+
+    variables = configuration.get("Environment", {}).get("Variables", {})
+    serialized = variables.get("SAGE_TOKEN_CUSTOMIZER_CONFIG")
+    if not isinstance(serialized, str):
+        raise ValueError(
+            f"{lane.lane_id} pre-token Lambda configuration is missing"
+        )
+    customizer = load_access_token_customizer_configuration(serialized)
+    if (
+        customizer.user_pool_id != lane.user_pool_id
+        or customizer.expected_tenant != lane.expected_tenant_claim
+        or customizer.canonical_tenant_claim_name != CANONICAL_TENANT_CLAIM_NAME
+        or customizer.trusted_assignment_attribute
+        != lane.trusted_assignment_attribute
+        or (
+            existing_client_id is not None
+            and existing_client_id not in customizer.trusted_client_ids
+        )
+    ):
+        raise ValueError(
+            f"{lane.lane_id} pre-token Lambda configuration is not lane-bound"
+        )
+    return code_sha256
 
 
-def step5_save_outputs(
-    pool_id: str,
-    domain_prefix: str,
-    axa_client_id: str,
-    allianz_client_id: str,
-) -> None:
-    """Save all deployment outputs to user_pool_output.json.
+def verify_lane_preflight(
+    cognito: Any, lambda_client: Any, lane: LaneInput
+) -> LanePreflight:
+    """Verify one pool plan, V2 trigger, immutable Lambda, and client."""
+    pool = cognito.describe_user_pool(UserPoolId=lane.user_pool_id)["UserPool"]
+    if pool.get("Id") != lane.user_pool_id:
+        raise ValueError(f"{lane.lane_id} user pool identity is invalid")
 
-    Args:
-        pool_id: Cognito User Pool ID.
-        domain_prefix: Cognito hosted UI domain prefix.
-        axa_client_id: AXA app client ID.
-        allianz_client_id: Allianz app client ID.
-    """
-    print("\nStep 5: Saving deployment outputs...")
-
-    discovery_url = (
-        f"https://cognito-idp.{REGION}.amazonaws.com/{pool_id}"
-        "/.well-known/openid-configuration"
+    lambda_config = pool.get("LambdaConfig", {})
+    trigger = lambda_config.get("PreTokenGenerationConfig", {})
+    version = trigger.get("LambdaVersion")
+    lambda_arn = trigger.get("LambdaArn")
+    feature_plan = pool.get("UserPoolTier")
+    feature_plan_supports_v2 = feature_plan in SUPPORTED_ACCESS_TOKEN_TIERS or (
+        feature_plan == "LITE" and version == "V2_0"
     )
-    cognito_domain = f"{domain_prefix}.auth.{REGION}.amazoncognito.com"
+    if not feature_plan_supports_v2:
+        raise ValueError(f"{lane.lane_id} feature plan does not support V2_0")
+    if version != "V2_0" or lambda_arn != lane.pre_token_lambda_arn:
+        raise ValueError(
+            f"{lane.lane_id} active PreTokenGeneration configuration is not V2_0"
+        )
 
-    output = {
-        "userPoolId": pool_id,
-        "cognitoDomain": domain_prefix,
-        "cognitoHostedUiDomain": cognito_domain,
-        "discoveryUrl": discovery_url,
-        "axaClientId": axa_client_id,
-        "allianzClientId": allianz_client_id,
-        "region": REGION,
-        "demoUsers": {
-            "axa": {"username": "axa-user", "password": "AXApassword1"},
-            "allianz": {"username": "allianz-user", "password": "Allianzpassword1"},
-        },
+    assignment_sources = [
+        attribute
+        for attribute in pool.get("SchemaAttributes", [])
+        if attribute.get("Name") == lane.trusted_assignment_attribute
+        and attribute.get("AttributeDataType") == "String"
+    ]
+    if len(assignment_sources) != 1:
+        raise ValueError(
+            f"{lane.lane_id} must have exactly one trusted assignment source"
+        )
+
+    existing_client_id = _inspect_existing_client(cognito, lane)
+    code_sha256 = _verify_pre_token_customizer(
+        lambda_client, lane, existing_client_id
+    )
+    return LanePreflight(
+        lane=lane,
+        feature_plan=feature_plan,
+        pre_token_lambda_arn=lambda_arn,
+        pre_token_lambda_version=version,
+        pre_token_lambda_code_sha256=code_sha256,
+        existing_client_id=existing_client_id,
+    )
+
+
+def verify_all_preflight(
+    cognito: Any, lambda_client: Any, lanes: tuple[LaneInput, ...]
+) -> tuple[LanePreflight, ...]:
+    """Verify both lanes completely before the caller can mutate Cognito."""
+    _validate_lane_inputs(lanes)
+    return tuple(
+        verify_lane_preflight(cognito, lambda_client, lane) for lane in lanes
+    )
+
+
+def configure_resource_scopes(cognito: Any, pool_id: str) -> None:
+    """Create or reconcile the fixed Sage custom scopes in one pool."""
+    existing = {
+        resource["Identifier"]: resource
+        for resource in _list_items(
+            cognito,
+            "list_resource_servers",
+            "ResourceServers",
+            UserPoolId=pool_id,
+        )
     }
-    OUTPUT_FILE.write_text(json.dumps(output, indent=2) + "\n")
-    print(f"  Saved to: {OUTPUT_FILE}")
+    for identifier, name, scope_pairs in RESOURCE_SERVERS:
+        scopes = [
+            {"ScopeName": scope_name, "ScopeDescription": description}
+            for scope_name, description in scope_pairs
+        ]
+        current = existing.get(identifier)
+        if current and current.get("Name") == name and current.get("Scopes") == scopes:
+            continue
+        parameters = {
+            "UserPoolId": pool_id,
+            "Identifier": identifier,
+            "Name": name,
+            "Scopes": scopes,
+        }
+        if current:
+            cognito.update_resource_server(**parameters)
+        else:
+            cognito.create_resource_server(**parameters)
 
 
-def main() -> None:
-    """Run all deployment steps for the Phase 2 Cognito User Pool."""
-    print("=== Deploying Sage Phase 2 Cognito User Pool ===")
-    print(f"Region: {REGION}\n")
+def ensure_public_client(
+    cognito: Any, preflight: LanePreflight
+) -> tuple[str, dict[str, Any]]:
+    """Create the lane's one public client, or return its verified existing client."""
+    lane = preflight.lane
+    if preflight.existing_client_id is None:
+        response = cognito.create_user_pool_client(
+            UserPoolId=lane.user_pool_id,
+            ClientName=lane.client_name,
+            GenerateSecret=False,
+            ExplicitAuthFlows=list(PUBLIC_AUTH_FLOWS),
+            ReadAttributes=[lane.trusted_assignment_attribute],
+            AccessTokenValidity=lane.approved_access_token_validity,
+            TokenValidityUnits={
+                "AccessToken": lane.approved_access_token_validity_unit
+            },
+            PreventUserExistenceErrors="ENABLED",
+            EnableTokenRevocation=True,
+        )
+        client_id = response["UserPoolClient"]["ClientId"]
+    else:
+        client_id = preflight.existing_client_id
 
-    prev = load_previous_output()
-    cognito = boto3.client("cognito-idp", region_name=REGION)
+    client = cognito.describe_user_pool_client(
+        UserPoolId=lane.user_pool_id, ClientId=client_id
+    )["UserPoolClient"]
+    return client_id, client
 
-    # Step 1: User Pool
-    pool_id = step1_user_pool(cognito, prev)
 
-    # Step 2: Cognito domain
-    domain_prefix = step2_cognito_domain(cognito, pool_id, prev)
+def _issuer(pool_id: str) -> str:
+    return f"https://cognito-idp.{REGION}.amazonaws.com/{pool_id}"
 
-    # Step 3a: AXA app client
-    axa_client_id, _ = step3_app_client(
-        cognito,
-        pool_id,
-        AXA_CLIENT_NAME,
-        "axa",
-        prev.get("axaClientId"),
-    )
 
-    # Step 3b: Allianz app client
-    allianz_client_id, _ = step3_app_client(
-        cognito,
-        pool_id,
-        ALLIANZ_CLIENT_NAME,
-        "allianz",
-        prev.get("allianzClientId"),
-    )
+def build_output(
+    deployed: tuple[tuple[LanePreflight, str, dict[str, Any]], ...]
+) -> dict[str, object]:
+    """Build exact two-lane records and approved/active lifetime evidence."""
+    trusted_lanes: list[TrustedLaneRecord] = []
+    lifetimes: list[TokenLifetimeEvidence] = []
+    trigger_evidence: list[dict[str, str]] = []
+    for preflight, client_id, client in deployed:
+        lane = preflight.lane
+        issuer = _issuer(lane.user_pool_id)
+        units = client.get("TokenValidityUnits", {})
+        active_value = client.get("AccessTokenValidity")
+        active_unit = units.get("AccessToken")
+        if (
+            not isinstance(active_value, int)
+            or not isinstance(active_unit, str)
+            or active_value != lane.approved_access_token_validity
+            or active_unit != lane.approved_access_token_validity_unit
+        ):
+            raise ValueError(
+                f"{lane.lane_id} active access-token lifetime does not match approval"
+            )
+        trusted_lanes.append(
+            TrustedLaneRecord(
+                laneId=lane.lane_id,
+                tenantId=lane.tenant_id,
+                userPoolId=lane.user_pool_id,
+                issuer=issuer,
+                discoveryUrl=f"{issuer}/.well-known/openid-configuration",
+                frontendClientIds=(client_id,),
+                agentRuntimeEndpoint=lane.agent_runtime_endpoint,
+                expectedTenantClaim=lane.expected_tenant_claim,
+                trustedAssignmentSource=lane.trusted_assignment_attribute,
+            )
+        )
+        lifetimes.append(
+            TokenLifetimeEvidence(
+                laneId=lane.lane_id,
+                activeValue=active_value,
+                activeUnit=active_unit,
+                documentedValue=lane.approved_access_token_validity,
+                documentedUnit=lane.approved_access_token_validity_unit,
+                approvalReference=lane.token_lifetime_approval_reference,
+            )
+        )
+        trigger_evidence.append(
+            {
+                "laneId": lane.lane_id,
+                "featurePlan": preflight.feature_plan,
+                "lambdaArn": preflight.pre_token_lambda_arn,
+                "lambdaVersion": preflight.pre_token_lambda_version,
+                "codeSha256": preflight.pre_token_lambda_code_sha256,
+            }
+        )
 
-    # Step 4: Demo users
-    step4_demo_users(cognito, pool_id, axa_client_id, allianz_client_id)
+    if len(trusted_lanes) != 2 or {lane.laneId for lane in trusted_lanes} != set(
+        LANE_IDS
+    ):
+        raise ValueError("output must contain exactly Tenant_A and Tenant_B")
+    return {
+        "region": REGION,
+        "canonicalTenantClaimName": CANONICAL_TENANT_CLAIM_NAME,
+        "acceptedTenantIds": list(LANE_IDS),
+        "scopes": list(SAGE_SCOPES),
+        "lanes": [asdict(lane) for lane in trusted_lanes],
+        "tokenLifetimes": [asdict(lifetime) for lifetime in lifetimes],
+        "preTokenGenerationEvidence": trigger_evidence,
+    }
 
-    # Step 5: Save outputs
-    step5_save_outputs(pool_id, domain_prefix, axa_client_id, allianz_client_id)
 
-    discovery_url = (
-        f"https://cognito-idp.{REGION}.amazonaws.com/{pool_id}"
-        "/.well-known/openid-configuration"
-    )
+def deploy(
+    cognito: Any, lambda_client: Any, lanes: tuple[LaneInput, ...]
+) -> dict[str, object]:
+    """Preflight both lanes, then configure their scopes and public clients."""
+    preflights = verify_all_preflight(cognito, lambda_client, lanes)
+    deployed: list[tuple[LanePreflight, str, dict[str, Any]]] = []
+    for preflight in preflights:
+        configure_resource_scopes(cognito, preflight.lane.user_pool_id)
+        client_id, client = ensure_public_client(cognito, preflight)
+        deployed.append((preflight, client_id, client))
+    return build_output(tuple(deployed))
 
-    print("\n=== User Pool deployment complete ===\n")
-    print(f"  User Pool ID:      {pool_id}")
-    print(f"  AXA Client ID:     {axa_client_id}")
-    print(f"  Allianz Client ID: {allianz_client_id}")
-    print(f"  Discovery URL:     {discovery_url}")
-    print(f"\nNext steps:")
-    print(f"  1. Update deploy_agent.sh to use this pool for JWT inbound auth:")
-    print(f"     bash scripts/deploy_agent.sh")
-    print(f"  2. Update frontend/.env.local with Cognito client IDs:")
-    print(f"     VITE_COGNITO_USER_POOL_ID={pool_id}")
-    print(f"     VITE_COGNITO_AXA_CLIENT_ID={axa_client_id}")
-    print(f"     VITE_COGNITO_ALLIANZ_CLIENT_ID={allianz_client_id}")
-    print(f"     VITE_COGNITO_DOMAIN={domain_prefix}.auth.{REGION}.amazoncognito.com")
+
+def main() -> int:
+    """Configure both existing pools and save trusted tenant-lane output."""
+    try:
+        lanes = load_lane_inputs()
+        cognito = boto3.client("cognito-idp", region_name=REGION)
+        lambda_client = boto3.client("lambda", region_name=REGION)
+        output = deploy(cognito, lambda_client, lanes)
+        OUTPUT_FILE.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+    except (ValueError, OSError) as error:
+        print(f"User-pool deployment rejected: {error}", file=sys.stderr)
+        return 1
+
+    print(f"Configured exactly two existing tenant pools: {OUTPUT_FILE}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

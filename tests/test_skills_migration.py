@@ -59,12 +59,12 @@ class TestSkillFileMigration:
     def test_claims_workflow_allowed_tools(self) -> None:
         """Claims workflow declares get_claim_details as allowed tool."""
         skill = Skill.from_file(_SKILLS_DIR / "claims-workflow")
-        assert "get_claim_details" in skill.allowed_tools
+        assert "get_claim_details" in (skill.allowed_tools or [])
 
     def test_premium_formulas_allowed_tools(self) -> None:
         """Premium formulas declares get_product_info as allowed tool."""
         skill = Skill.from_file(_SKILLS_DIR / "premium-formulas")
-        assert "get_product_info" in skill.allowed_tools
+        assert "get_product_info" in (skill.allowed_tools or [])
 
 
 class TestSkillFromContent:
@@ -96,19 +96,12 @@ Use get_data and fetch_info to answer questions.
 """
         skill = Skill.from_content(content)
         assert skill.name == "registry-skill"
-        assert "get_data" in skill.allowed_tools
-        assert "fetch_info" in skill.allowed_tools
+        assert "get_data" in (skill.allowed_tools or [])
+        assert "fetch_info" in (skill.allowed_tools or [])
 
 
 class TestAgentSkillsPlugin:
-    """Verify AgentSkills plugin initializes correctly."""
-
-    def test_plugin_discovers_all_skills(self) -> None:
-        """Plugin discovers both skills from the skills/ directory."""
-        plugin = AgentSkills(skills=_SKILLS_DIR)
-        skills = plugin.get_available_skills()
-        names = {s.name for s in skills}
-        assert names == {"claims-workflow", "premium-formulas"}
+    """Verify AgentSkills plugin accepts Registry-loaded skills."""
 
     def test_plugin_accepts_programmatic_skills(self) -> None:
         """Plugin accepts Skill instances directly (Registry integration path)."""

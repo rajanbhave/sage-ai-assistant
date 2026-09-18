@@ -1,47 +1,125 @@
 """Data tools for the Sage MCP server.
 
-These tools return tenant-scoped business data from the in-memory mock
-store. Every tool reads the tenant ID from the
-``X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id`` request header —
-never from user input.
+These tools return tenant-scoped business data only through the configured
+shared Sage API. Every tool derives request identity from the Runtime-validated
+access token and trusted hosting-lane configuration, then forwards only the
+exact received bearer and unchanged correlation ID.
 
 Tool descriptions are crafted for AgentCore Gateway semantic routing
 accuracy.
 """
 
+from collections.abc import Callable
+from dataclasses import dataclass
+
+import json
+import logging
+
 from fastmcp import FastMCP
 from fastmcp.dependencies import CurrentHeaders
 from fastmcp.exceptions import ToolError
 
-from mcp_server.mock_data import MOCK_DATA
+from mcp_server.identity import (
+    McpIdentityConfiguration,
+    RequestIdentity,
+    establish_request_identity,
+    header_values,
+)
+from mcp_server.sage_api_client import SageApiClient, SageApiRequestError
+from sage_identity import (
+    AUTHORIZATION_HEADER,
+    CORRELATION_HEADER,
+    AuthenticationArtifact,
+    CorrelationId,
+    IdentityError,
+    IdentityErrorCode,
+    parse_bearer_authorization,
+    serialize_identity_error,
+    serialize_log_fields,
+)
 
-TENANT_HEADER = "x-amzn-bedrock-agentcore-runtime-custom-tenant-id"
+logger = logging.getLogger(__name__)
+
+
+def _stable_failure(
+    code: IdentityErrorCode, correlation_id: CorrelationId
+) -> ToolError:
+    """Log and expose only stable, non-secret failure fields."""
+    error = IdentityError(code, correlation_id)
+    logger.warning(
+        "MCP data tool failed",
+        extra={
+            "identity_error": serialize_log_fields(
+                {"code": error.code.value, "correlation_id": error.correlation_id}
+            )
+        },
+    )
+    return ToolError(
+        json.dumps(serialize_identity_error(error), separators=(",", ":"))
+    )
+
+
+def _validated_result(payload: object, key: str) -> dict[str, object]:
+    """Validate the small JSON shape returned by one Sage API operation."""
+    if not isinstance(payload, dict) or key not in payload:
+        raise TypeError("Sage API response does not match the tool result schema")
+    value = payload[key]
+    if key == "products" and not isinstance(value, list):
+        raise TypeError("Sage API product result is invalid")
+    if key == "claim" and value is not None and not isinstance(value, dict):
+        raise TypeError("Sage API claim result is invalid")
+    return payload
+
+
+def _call_sage_api(
+    call: Callable[[], dict[str, object]],
+    result_key: str,
+    correlation_id: CorrelationId,
+) -> dict[str, object]:
+    """Call the API and expose only its validated JSON result or safe failure."""
+    try:
+        return _validated_result(call(), result_key)
+    except (SageApiRequestError, TypeError, ValueError, OSError):
+        failure = _stable_failure(IdentityErrorCode.REQUEST_FAILED, correlation_id)
+    raise failure
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedRequest:
+    identity: RequestIdentity
+    bearer: AuthenticationArtifact
+    correlation_id: CorrelationId
+
+
+def _get_request(headers: dict) -> _ValidatedRequest:
+    """Validate lane identity and retain only trusted outbound transport."""
+    correlation_id = CorrelationId.new()
+    try:
+        correlation_values = header_values(headers, CORRELATION_HEADER)
+        if len(correlation_values) != 1 or not isinstance(
+            correlation_values[0], str
+        ):
+            raise ValueError("exactly one correlation header is required")
+        correlation_id = CorrelationId(correlation_values[0])
+        authorization_values = header_values(headers, AUTHORIZATION_HEADER)
+        bearer = parse_bearer_authorization(authorization_values, correlation_id)
+        identity = establish_request_identity(
+            bearer,
+            McpIdentityConfiguration.from_environment(),
+            correlation_id,
+        )
+    except (IdentityError, ValueError):
+        failure = _stable_failure(
+            IdentityErrorCode.TENANT_IDENTITY_INVALID, correlation_id
+        )
+    else:
+        return _ValidatedRequest(identity, bearer, correlation_id)
+    raise failure
 
 
 def _get_tenant(headers: dict) -> str:
-    """Extract and validate the tenant ID from request headers.
-
-    Args:
-        headers: HTTP request headers dict (lowercased keys from FastMCP).
-
-    Returns:
-        Validated tenant ID string.
-
-    Raises:
-        ToolError: If the header is missing or the tenant is unknown.
-    """
-    tenant_id = headers.get(TENANT_HEADER, "").strip().lower()
-    if not tenant_id:
-        raise ToolError(
-            f"Missing required header '{TENANT_HEADER}'. "
-            "error_type: invalid_tenant"
-        )
-    if tenant_id not in MOCK_DATA:
-        raise ToolError(
-            f"Unknown tenant '{tenant_id}'. "
-            "error_type: invalid_tenant"
-        )
-    return tenant_id
+    """Establish lane-bound request identity and return its signed tenant."""
+    return _get_request(headers).identity.tenant_id
 
 
 def register_data_tools(mcp: FastMCP) -> None:
@@ -63,34 +141,28 @@ def register_data_tools(mcp: FastMCP) -> None:
         product_type: str,
         headers: dict = CurrentHeaders(),
     ) -> dict:
-        """Return product details for the given type, scoped to the current tenant.
-
-        Reads the tenant ID from the
-        ``X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id`` header and
-        returns all products of the requested type for that tenant.
+        """Return tenant-scoped product details from the shared Sage API.
 
         Args:
             product_type: The product category to filter by (e.g. ``"motor"``).
             headers: Injected HTTP request headers (provided by FastMCP).
 
         Returns:
-            Dict with ``tenant``, ``product_type``, and ``products`` list.
+            The Sage API product response.
 
         Raises:
-            ToolError: If the tenant header is missing, unknown, or no
-                products match the requested type.
+            ToolError: If identity validation or the Sage API request fails.
         """
-        tenant_id = _get_tenant(headers)
-        products = [
-            p for p in MOCK_DATA[tenant_id]["products"]
-            if p["type"].lower() == product_type.lower()
-        ]
-        if not products:
-            raise ToolError(
-                f"No '{product_type}' products found for tenant '{tenant_id}'. "
-                "error_type: not_found"
-            )
-        return {"tenant": tenant_id, "product_type": product_type, "products": products}
+        request = _get_request(headers)
+        return _call_sage_api(
+            lambda: SageApiClient.from_environment().get_product_info(
+                product_type,
+                request.bearer,
+                request.correlation_id,
+            ),
+            "products",
+            request.correlation_id,
+        )
 
     @mcp.tool(
         description=(
@@ -104,29 +176,25 @@ def register_data_tools(mcp: FastMCP) -> None:
         claim_reference: str,
         headers: dict = CurrentHeaders(),
     ) -> dict:
-        """Return details for a specific claim, scoped to the current tenant.
-
-        Reads the tenant ID from the
-        ``X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id`` header and
-        looks up the claim within that tenant's data only.
+        """Return tenant-scoped claim details from the shared Sage API.
 
         Args:
             claim_reference: The claim reference string (e.g. ``"CLM-12345"``).
             headers: Injected HTTP request headers (provided by FastMCP).
 
         Returns:
-            Dict with the full claim record.
+            The Sage API claim response.
 
         Raises:
-            ToolError: If the tenant header is missing/unknown, or the claim
-                reference is not found for this tenant.
+            ToolError: If identity validation or the Sage API request fails.
         """
-        tenant_id = _get_tenant(headers)
-        claims = MOCK_DATA[tenant_id]["claims"]
-        for claim in claims:
-            if claim["claim_reference"].upper() == claim_reference.upper():
-                return {"tenant": tenant_id, "claim": claim}
-        raise ToolError(
-            f"Claim '{claim_reference}' not found for tenant '{tenant_id}'. "
-            "error_type: not_found"
+        request = _get_request(headers)
+        return _call_sage_api(
+            lambda: SageApiClient.from_environment().get_claim_details(
+                claim_reference,
+                request.bearer,
+                request.correlation_id,
+            ),
+            "claim",
+            request.correlation_id,
         )

@@ -9,10 +9,10 @@ from enum import Enum
 
 
 class TenantId(str, Enum):
-    """Valid tenant identifiers."""
+    """Valid internal tenant identifiers."""
 
-    AXA = "axa"
-    ALLIANZ = "allianz"
+    TENANT_A = "Tenant_A"
+    TENANT_B = "Tenant_B"
 
 
 @dataclass

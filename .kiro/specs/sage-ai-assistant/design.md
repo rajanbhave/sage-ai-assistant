@@ -47,11 +47,11 @@ graph TB
     end
 
     subgraph Cognito - sage-tenant-pool
-        CTP[Tenant User Pool<br/>sage-axa-client / sage-allianz-client<br/>issues ID tokens with custom:tenant_id]
+        CTP[Tenant User Pool<br/>sage-tenant-a-client / sage-tenant-b-client<br/>issues ID tokens with custom:tenant_id]
     end
 
     subgraph AgentCore Runtime - Agent
-        SA[Strands SDK Agent<br/>Sage Agent<br/>/invocations endpoint<br/>allowedAudience: axaClientId, allianzClientId]
+        SA[Strands SDK Agent<br/>Sage Agent<br/>/invocations endpoint<br/>allowedAudience: tenantAClientId, tenantBClientId]
         BP[Base Prompt<br/>agent/prompts/system.md]
         JD[JWT decode<br/>extract custom:tenant_id]
     end
@@ -127,20 +127,20 @@ sequenceDiagram
     participant MockData as Mock Data Store
 
     User->>LoginUI: Select tenant (AXA) + enter credentials
-    LoginUI->>Cognito: USER_PASSWORD_AUTH (sage-axa-client)
-    Cognito-->>LoginUI: ID token (custom:tenant_id = "axa")
+    LoginUI->>Cognito: USER_PASSWORD_AUTH (sage-tenant-a-client)
+    Cognito-->>LoginUI: ID token (custom:tenant_id = "Tenant_A")
     LoginUI->>ChatUI: Session established (idToken, tenantId)
 
     User->>ChatUI: Type query
     ChatUI->>SSEClient: Send message + idToken + tenantId
-    SSEClient->>Agent: POST /invocations\nAuthorization: Bearer <id_token>\nX-...-Tenant-Id: axa
-    Agent->>Agent: Validate JWT (allowedAudience)\nDecode payload → custom:tenant_id = "axa"
+    SSEClient->>Agent: POST /invocations\nAuthorization: Bearer <id_token>\nX-...-Tenant-Id: Tenant_A
+    Agent->>Agent: Validate JWT (allowedAudience)\nDecode payload → custom:tenant_id = "Tenant_A"
     Agent->>Agent: Load base prompt from agent/prompts/system.md
     Agent->>CognitoM2M: client_credentials grant (sage-mcp/tools)
     CognitoM2M-->>Agent: M2M access token
     Agent->>Bedrock: Send [system_prompt + user_message]
     Bedrock->>Agent: Tool use request
-    Agent->>Gateway: x_amz_bedrock_agentcore_search(query)\nAuthorization: Bearer <m2m_token>\nX-...-Tenant-Id: axa
+    Agent->>Gateway: x_amz_bedrock_agentcore_search(query)\nAuthorization: Bearer <m2m_token>\nX-...-Tenant-Id: Tenant_A
     Gateway->>Gateway: Semantic match against tool descriptions
     Gateway-->>Agent: Matched tools [load_premium_formulas_context, get_product_info]
     Agent->>MCP: invoke load_premium_formulas_context()\nBearer <m2m_token> (allowedClients)
@@ -149,7 +149,7 @@ sequenceDiagram
     MCP-->>Agent: Domain context string
     Agent->>Bedrock: Send [system + user + domain_context]
     Bedrock->>Agent: Tool use request for get_product_info(product_type="motor")
-    Agent->>MCP: invoke get_product_info(product_type="motor")\nX-...-Tenant-Id: axa
+    Agent->>MCP: invoke get_product_info(product_type="motor")\nX-...-Tenant-Id: Tenant_A
     MCP->>MockData: Filter AXA motor products
     MockData-->>MCP: AXA motor product data
     MCP-->>Agent: Product info JSON
@@ -482,13 +482,13 @@ skills/
 
 **Responsibility:** Provides tenant-scoped demo data for data tools.
 
-**Implementation:** In-memory Python dictionaries in `mcp_server/mock_data.py`.
+**Implementation:** In-memory Python dictionaries in `sage_api/mock_data.py`.
 
 ```python
-# mcp_server/mock_data.py
+# sage_api/mock_data.py
 
 MOCK_DATA = {
-    "axa": {
+    "Tenant_A": {
         "products": {
             "motor": {
                 "name": "AXA Motor Insurance",
@@ -509,7 +509,7 @@ MOCK_DATA = {
             }
         }
     },
-    "allianz": {
+    "Tenant_B": {
         "products": {
             "motor": {
                 "name": "Allianz Motor Protection",
@@ -648,8 +648,8 @@ from typing import Optional
 from enum import Enum
 
 class TenantId(str, Enum):
-    AXA = "axa"
-    ALLIANZ = "allianz"
+    TENANT_A = "Tenant_A"
+    TENANT_B = "Tenant_B"
 
 # --- Tool Input/Output Models ---
 
@@ -731,7 +731,7 @@ class ToolError:
 │ /invocations│    │ context         │    │                  │    │ by tenant    │
 └─────────────┘    └─────────────────┘    └──────────────────┘    └──────────────┘
 
-Header: X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id: axa|allianz
+Header: X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id: Tenant_A|Tenant_B
 ```
 
 ### Authentication Models
@@ -792,15 +792,15 @@ Cognito configuration:
   "userPoolName": "sage-tenant-pool",
   "appClients": [
     {
-      "clientName": "sage-axa-client",
+      "clientName": "sage-tenant-a-client",
       "customAttributes": {
-        "tenant_id": "axa"
+        "tenant_id": "Tenant_A"
       }
     },
     {
-      "clientName": "sage-allianz-client",
+      "clientName": "sage-tenant-b-client",
       "customAttributes": {
-        "tenant_id": "allianz"
+        "tenant_id": "Tenant_B"
       }
     }
   ],
@@ -975,7 +975,7 @@ This feature requires both unit tests and property-based tests for comprehensive
 | Property 1: Skill Round-Trip | Write random Markdown to skill file, invoke context tool, assert output matches file content | `st.text()` for Markdown content |
 | Property 2: Tool Invocation Correctness | Generate valid tool names and parameters, invoke on MCP server, assert non-error response with correct schema | Custom strategy for tool name + params |
 | Property 3: Error Response Structure | Generate failure scenarios (missing files, bad tenants), invoke tools, assert error contains tool name and reason | Custom strategy for error conditions |
-| Property 5: Agent Tenant Header Extraction | Generate valid tenant IDs in request headers, assert agent extracts correct value | `st.sampled_from(["axa", "allianz"])` + custom header builder |
+| Property 5: Agent Tenant Header Extraction | Generate valid tenant IDs in request headers, assert agent extracts correct value | `st.sampled_from(["Tenant_A", "Tenant_B"])` + custom header builder |
 | Property 6: Data Tool Tenant Isolation | Generate tenant ID + data query combos, invoke data tool, assert all results belong to queried tenant | `st.sampled_from(tenants)` × `st.sampled_from(product_types)` |
 | Property 7: Cross-Tenant Data Rejection | Generate claim refs belonging to tenant A, invoke with tenant B, assert "not found" | Pairs of distinct tenants × claim refs |
 | Property 8: Skill Tenant Independence | Generate pairs of tenant IDs, invoke same context tool for each, assert identical output | `st.sampled_from(tenants)` pairs |
@@ -998,7 +998,7 @@ This feature requires both unit tests and property-based tests for comprehensive
 
 | Property | Test Description | Generator Strategy |
 |----------|-----------------|-------------------|
-| Property 4: Tenant Header Propagation | Generate tenant selections, assert every POST request from AgentCore Client to Strands agent includes correct header | `fc.constantFrom("axa", "allianz")` |
+| Property 4: Tenant Header Propagation | Generate tenant selections, assert every POST request from AgentCore Client to Strands agent includes correct header | `fc.constantFrom("Tenant_A", "Tenant_B")` |
 
 #### Unit Tests
 

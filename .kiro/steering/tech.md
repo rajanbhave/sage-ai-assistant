@@ -2,95 +2,73 @@
 inclusion: always
 ---
 
-# Tech Stack & Development Conventions
+# Tech Stack and Development Conventions
 
-## Backend — Python
+## Backend
 
-- **Runtime**: Python 3.11+
-- **Agent framework**: Strands SDK for orchestration with tool use
-- **Agent server**: BedrockAgentCoreApp SDK (`bedrock-agentcore`) — handles `/invocations`, `/ping`, streaming, port 8080 automatically
-- **MCP server**: FastMCP with decorator-based tool registration (`@mcp.tool()`), runs on port 8000 with `stateless_http=True`
-- **Foundation model**: Amazon Bedrock — Claude Sonnet 4.5
-- **Hosting**: AgentCore Runtime (agent + MCP server), AgentCore Gateway (semantic routing)
-- **Auth**: Two Cognito pools — `sage-tenant-pool` for user ID tokens (Phase 2, `allowedAudience` on agent runtime) and `sage-mcp-pool` for M2M tokens (Gateway→MCP, `allowedClients` on MCP runtime). Phase 1 fallback uses M2M token directly from frontend.
+- Python 3.13+
+- Strands Agents and `BedrockAgentCoreApp`
+- FastMCP on port 8000 with streamable HTTP
+- AgentCore Runtime for Agent and MCP hosting
+- AgentCore Gateway HTTP MCP passthrough with `JWT_PASSTHROUGH`
+- PyJWT with cryptography for independent Sage API validation
+- `uv` with `pyproject.toml` and `uv.lock`
 
-### Python code style
+### Python conventions
 
-- Type hints on all function signatures
-- Docstrings on public functions (Google style)
-- Tool functions must include a descriptive docstring — AgentCore Gateway uses it for semantic routing
-- No domain logic in the agent layer; agent code is orchestration only
-- Tenant ID comes from the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header — never from user input or hardcoded values
-- Data tools must use `headers: dict = CurrentHeaders()` (from `fastmcp.dependencies`) to receive injected HTTP headers — never `headers: dict | None = None`
-- MCP server runs on port 8000 (not 8080) with `stateless_http=True` passed to `mcp.run()`
+- Use type hints and focused docstrings on public boundaries.
+- Keep model orchestration in `agent/`, MCP transport/tool registration in `mcp_server/`, shared API authorization/data in `sage_api/`, and cross-component identity primitives in `sage_identity/`.
+- Use `headers: dict = CurrentHeaders()` for FastMCP request headers.
+- Parse exactly one Authorization bearer at each code-owned forwarding boundary and preserve its bytes.
+- Do not put architecture route names into implementation identifiers.
+- Do not add dependencies when the standard library or an installed package already covers the need.
 
-## Frontend — TypeScript / React
+## Frontend
 
-- **UI framework**: React 18+ with functional components and hooks
-- **Build tool**: Vite
-- **Styling**: Tailwind CSS + shadcn/ui components
-- **Streaming**: Custom AgentCore Client (adapted from FAST) — direct SSE from BedrockAgentCoreApp `/invocations`
-- **Language**: TypeScript in strict mode
-- **Hosting**: AWS Amplify Hosting (demo)
+- React, TypeScript strict mode, Vite, Tailwind CSS, shadcn/ui
+- `amazon-cognito-identity-js` for tenant-specific browser authentication
+- Direct streaming to the selected Agent Runtime endpoint
 
-### TypeScript code style
+### Frontend conventions
 
-- Prefer `interface` over `type` for object shapes
-- Use named exports
-- All agent communication goes through `frontend/src/lib/agentcore-client/client.ts` — this is the single point where the tenant header is injected
-- When `tenantId` changes, the conversation must be cleared via `useEffect` dependency on `tenantId` in `ChatInterface.tsx`
+- Trusted lane configuration contains exactly Tenant_A and Tenant_B.
+- Access tokens and renewal stay inside the authentication/session layer.
+- All Agent invocation transport goes through `frontend/src/lib/agentcore-client/client.ts`.
+- Conversation state is bound to session, lane, subject, and tenant; identity changes clear it.
+- Render model output as safe text/Markdown, never unsanitized HTML.
+
+## Authentication responsibilities
+
+| Component | Responsibility |
+|---|---|
+| Frontend | Validate lane/session claims and send the current access token |
+| Managed authorizers | Verify signature, expiry, issuer, client, token type, local scope, and exact lane tenant |
+| Agent application | Forward the exact bearer and correlation ID |
+| MCP application | Extract subject/tenant and enforce hosting-lane equality |
+| Sage API | Independently validate both issuers and enforce business/data authorization |
+
+AgentCore Identity access-token and workload-token decorators are intentionally absent because they obtain replacement outbound credentials.
 
 ## Testing
 
-| Layer | Framework | Style |
-|-------|-----------|-------|
-| Backend | pytest + Hypothesis | Property-based tests for business logic, unit tests for tools |
-| Frontend | Jest/Vitest + fast-check | Property-based tests for data transforms, component tests for UI |
+| Layer | Command |
+|---|---|
+| Backend | `uv run pytest -q` |
+| Python compile | `uv run python -m compileall -q agent mcp_server sage_api sage_identity scripts tests` |
+| Frontend tests | `cd frontend && npm test` |
+| Frontend build | `cd frontend && npm run build` |
+| Shell syntax | `bash -n scripts/deploy_agent.sh scripts/deploy_gateway.sh scripts/deploy_mcp.sh` |
 
-- Property-based tests are the preferred approach for validating business rules (premium calculations, data filtering, tenant isolation)
-- Use `@given` (Hypothesis) and `fc.property` (fast-check) for invariant checks
-- Unit tests cover tool registration, header parsing, and API contract validation
+Property tests are useful for identity invariants; focused unit tests cover exact bearer transport, authorizer payloads, fail-closed parsing, and API isolation.
 
-## Common Commands
+## Deployment
 
 ```bash
-# Initialize Python project (first time)
-uv init
-uv venv
-source .venv/bin/activate
-
-# Add Python dependencies
-uv add strands-agents bedrock-agentcore fastmcp
-
-# Add dev dependencies
-uv add --dev hypothesis pytest
-
-# Run MCP server locally
-uv run python mcp_server/server.py
-
-# Run agent locally
-uv run python agent/agent.py
-
-# Frontend dev
-cd frontend && npm install && npm run dev
-
-# Run backend tests
-uv run pytest
-
-# Run frontend tests
-cd frontend && npm test
-
-# Deploy (order matters: Gateway → MCP → Agent)
-uv run python scripts/deploy_gateway.py   # or: bash scripts/deploy_gateway.sh
+uv run python scripts/deploy_user_pool.py
+uv run python scripts/deploy_registry.py
 bash scripts/deploy_mcp.sh
+bash scripts/deploy_gateway.sh
 bash scripts/deploy_agent.sh
-
-# Get a fresh bearer token (auto-updates frontend/.env.local)
-uv run python scripts/get_token.py
 ```
 
-## Dependency management
-
-- Backend: `uv` with `pyproject.toml` and `uv.lock` at project root — managed via `uv add`/`uv remove`
-- Frontend: `package.json` in `frontend/` — managed via `npm`
-- No monorepo tooling; backend and frontend are managed independently
+Deployment uses `scripts/identity_deployment.json` or `SAGE_IDENTITY_CONFIG_FILE`. Rendering and dry-run planning are mutation-free; deploy commands require explicit operator intent and approved AWS configuration.

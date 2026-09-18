@@ -27,6 +27,7 @@ import socket
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Force IPv4 — macOS often resolves AWS endpoints to IPv6 but the route hangs.
 _orig_getaddrinfo = socket.getaddrinfo
@@ -117,7 +118,7 @@ def discover_skills() -> list[dict]:
     return skills
 
 
-def step1_create_registry(client: object, prev: dict) -> tuple[str, str]:
+def step1_create_registry(client: Any, prev: dict) -> tuple[str, str]:
     """Create or reuse the sage-skills Registry.
 
     Args:
@@ -198,7 +199,7 @@ def step1_create_registry(client: object, prev: dict) -> tuple[str, str]:
 
 
 def step2_publish_skills(
-    client: object, registry_id: str, skills: list[dict], prev: dict,
+    client: Any, registry_id: str, skills: list[dict], prev: dict,
 ) -> list[dict]:
     """Publish each skill as an AGENT_SKILLS record.
 
@@ -306,7 +307,7 @@ def step2_publish_skills(
 
 
 def step3_wait_for_draft_and_submit(
-    client: object, registry_id: str, records: list[dict],
+    client: Any, registry_id: str, records: list[dict],
 ) -> None:
     """Wait for records to reach DRAFT, then submit for approval.
 
