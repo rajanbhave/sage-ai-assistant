@@ -1,26 +1,12 @@
+import {
+  type SafeMessageSegment,
+  type SafeToolCallSegment,
+} from "@/lib/safe-content";
 import { cn } from "@/lib/utils";
-
-// --- Types (aligned with ChatInterface segment model) ---
-
-interface TextSegment {
-  type: "text";
-  content: string;
-}
-
-interface ToolCallSegment {
-  type: "tool_call";
-  toolUseId: string;
-  name: string;
-  input: string;
-  result?: string;
-  status: "running" | "complete";
-}
-
-type MessageSegment = TextSegment | ToolCallSegment;
 
 export interface ChatMessageProps {
   role: "user" | "assistant";
-  segments: MessageSegment[];
+  segments: readonly SafeMessageSegment[];
   isStreaming?: boolean;
 }
 
@@ -126,7 +112,7 @@ function renderInlineTokens(text: string): React.ReactNode[] {
 
 // --- ToolActivity sub-component ---
 
-function ToolActivity({ seg }: { seg: ToolCallSegment }) {
+function ToolActivity({ seg }: { seg: SafeToolCallSegment }) {
   return (
     <div className="my-2 rounded-lg border border-border bg-background/60 px-3 py-2 text-xs font-mono">
       <div className="flex items-center gap-2 mb-1">
@@ -165,6 +151,7 @@ function ToolActivity({ seg }: { seg: ToolCallSegment }) {
 
 export function ChatMessage({ role, segments, isStreaming }: ChatMessageProps) {
   const isUser = role === "user";
+  const safeSegments = segments;
 
   return (
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
@@ -176,7 +163,7 @@ export function ChatMessage({ role, segments, isStreaming }: ChatMessageProps) {
             : "bg-muted text-foreground"
         )}
       >
-        {segments.map((seg, i) => {
+        {safeSegments.map((seg, i) => {
           if (seg.type === "text") {
             if (isUser) {
               // User messages: plain whitespace-preserved text
@@ -199,7 +186,7 @@ export function ChatMessage({ role, segments, isStreaming }: ChatMessageProps) {
         })}
 
         {/* Streaming dots when no content yet */}
-        {isStreaming && segments.length === 0 && (
+        {isStreaming && safeSegments.length === 0 && (
           <span className="inline-flex gap-1">
             <span className="animate-bounce [animation-delay:0ms]">·</span>
             <span className="animate-bounce [animation-delay:150ms]">·</span>

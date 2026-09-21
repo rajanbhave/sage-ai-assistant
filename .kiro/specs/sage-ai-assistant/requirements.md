@@ -38,6 +38,8 @@ This is an end-to-end demo showcasing the full flow from UI to AgentCore modules
 | Allianz | "How is the premium calculated for a motor policy?" | → `load_premium_formulas_context` (appends domain context) → `get_product_info` (returns Allianz motor product details) |
 | AXA | "What's the status of claim CLM-12345?" | → `load_claims_workflow_context` (appends domain context) → `get_claim_details` (returns AXA claim CLM-12345) |
 | Allianz | "What's the status of claim CLM-5454?" | → `load_claims_workflow_context` (appends domain context) → `get_claim_details` (returns Allianz claim CLM-5454) |
+| AXA | "What motor products do you offer and how is the premium worked out?" | → `load_premium_formulas_context` (appends premium calculation rules) → `get_product_info` (returns AXA Drive Protect details with base premium) |
+| Allianz | "Walk me through how my claim CLM-5454 is being processed" | → `load_claims_workflow_context` (appends claims workflow domain knowledge) → `get_claim_details` (returns Allianz CLM-5454 status and details) |
 
 ## Glossary
 
@@ -233,7 +235,7 @@ The demo showcases two tenants with mock data:
 #### Phase 2: JWT Tenant Authentication (Active)
 
 1. THE AgentCore Runtime (agent) inbound auth SHALL accept Cognito ID tokens from the tenant user pool (`sage-tenant-pool`). The JWT authorizer SHALL use `allowedAudience` with the AXA and Allianz app client IDs — ID tokens carry `aud` = client ID.
-2. THE React frontend SHALL authenticate users against the tenant-specific Cognito app client (`sage-axa-client` or `sage-allianz-client`) using `USER_PASSWORD_AUTH` via `amazon-cognito-identity-js`, obtain an ID token containing `custom:tenant_id`, and send it via the `Authorization: Bearer` header on every `/invocations` request.
+2. THE React frontend SHALL authenticate users against the tenant-specific Cognito app client (`sage-tenant-a-client` or `sage-tenant-b-client`) using `USER_PASSWORD_AUTH` via `amazon-cognito-identity-js`, obtain an ID token containing `custom:tenant_id`, and send it via the `Authorization: Bearer` header on every `/invocations` request.
 3. THE Sage_Agent SHALL extract the tenant identifier from the JWT `custom:tenant_id` claim (base64-decoded payload, no signature verification needed — runtime already validated) and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation. Phase 1 direct-header fallback is retained for compatibility.
 4. THE tenant user pool SHALL be deployed via `scripts/deploy_user_pool.py`, which creates the pool, two app clients (one per tenant), and demo users (`axa-user`, `allianz-user`) with permanent passwords and `custom:tenant_id` attributes.
 5. THE Sage_Agent SHALL integrate Amazon Bedrock Guardrails for out-of-domain query handling, replacing the base prompt's static instruction with a managed guardrail policy.

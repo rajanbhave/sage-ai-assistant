@@ -1,448 +1,321 @@
 #!/usr/bin/env python3
-"""Deploy the AgentCore Gateway with Cognito OAuth M2M authentication.
+"""Render or deploy two lane-local AgentCore HTTP MCP passthrough targets.
 
-Steps:
-  1. Resolve MCP server runtime ARN from .bedrock_agentcore.yaml
-  2. Create (or reuse) a Cognito User Pool, domain, resource server, and M2M client
-  3. Create an AgentCore OAuth2 credential provider (token vault)
-  4. Create the AgentCore Gateway with semantic search enabled
-  5. Add the MCP server as a gateway target with OAuth credentials
-  6. Synchronize gateway targets
-  7. Save all outputs to scripts/gateway_output.json
-
-Prerequisites:
-  - AWS credentials configured (aws configure)
-  - bedrock-agentcore-starter-toolkit installed (uv add bedrock-agentcore)
-  - MCP server deployed (deploy_mcp.sh) — runtime ARN needed
+The deployment configuration must contain exactly Tenant_A and Tenant_B. Each
+lane supplies its existing Gateway ID, deployed MCP Runtime ARN, and deployed
+Runtime qualifier. This script creates no Cognito, M2M, OAuth credential, or
+semantic MCP resources.
 
 Usage:
+  uv run python scripts/deploy_gateway.py --render
   uv run python scripts/deploy_gateway.py
-
-Environment variables (optional overrides):
-  AWS_REGION          — defaults to us-east-1
-  MCP_RUNTIME_ARN     — MCP server runtime ARN (auto-detected from .bedrock_agentcore.yaml)
-  GATEWAY_NAME        — gateway name prefix (defaults to sage-gateway)
-  COGNITO_POOL_NAME   — Cognito User Pool name (defaults to sage-mcp-pool)
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import os
 import socket
 import sys
-import time
 import urllib.parse
+from collections.abc import Mapping
+from datetime import date
 from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Force IPv4 — macOS often resolves AWS endpoints to IPv6 but the route hangs.
 _orig_getaddrinfo = socket.getaddrinfo
 
-def _ipv4_getaddrinfo(*args, **kwargs):
+
+def _ipv4_getaddrinfo(*args: Any, **kwargs: Any) -> list[tuple[Any, ...]]:
     results = _orig_getaddrinfo(*args, **kwargs)
-    ipv4 = [r for r in results if r[0] == socket.AF_INET]
+    ipv4 = [result for result in results if result[0] == socket.AF_INET]
     return ipv4 if ipv4 else results
+
 
 socket.getaddrinfo = _ipv4_getaddrinfo
 
 import boto3
-import yaml
 
-# ── Configuration ─────────────────────────────────────────────────────
+from sage_identity import (
+    TENANT_A,
+    TENANT_B,
+    record_target_capability_evidence,
+    verify_target_capability_evidence,
+)
+from scripts.render_identity_deployments import render_deployments
 
-REGION = os.environ.get("AWS_REGION", "us-east-1")
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
+SCRIPT_DIR = PROJECT_ROOT / "scripts"
+DEFAULT_CONFIG_FILE = SCRIPT_DIR / "identity_deployment.json"
 OUTPUT_FILE = SCRIPT_DIR / "gateway_output.json"
-
-GATEWAY_NAME = os.environ.get("GATEWAY_NAME", "sage-gateway")
-COGNITO_POOL_NAME = os.environ.get("COGNITO_POOL_NAME", "sage-mcp-pool")
-RESOURCE_SERVER_ID = "sage-mcp"
-SCOPE_NAME = "tools"
-FULL_SCOPE = f"{RESOURCE_SERVER_ID}/{SCOPE_NAME}"
-M2M_CLIENT_NAME = "sage-gateway-m2m"
-CREDENTIAL_PROVIDER_NAME = "sage-mcp-oauth"
-TARGET_NAME = "sage-mcp-target"
+_REQUIRED_LANES = frozenset({TENANT_A, TENANT_B})
+_TARGET_CREDENTIALS = [{"credentialProviderType": "JWT_PASSTHROUGH"}]
 
 
-def load_previous_output() -> dict:
-    """Load previously saved gateway output if it exists."""
-    if OUTPUT_FILE.exists():
-        try:
-            return json.loads(OUTPUT_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+def _required_text(record: Mapping[str, Any], field: str) -> str:
+    value = record.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
 
 
-def step0_resolve_mcp_arn() -> tuple[str, str]:
-    """Resolve MCP server runtime ARN and build endpoint URI."""
-    print("Step 0: Resolving MCP server runtime ARN...")
-
-    mcp_arn = os.environ.get("MCP_RUNTIME_ARN", "")
-    if not mcp_arn:
-        config_path = PROJECT_ROOT / ".bedrock_agentcore.yaml"
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        agent = cfg.get("agents", {}).get("sage_mcp_server", {})
-        mcp_arn = agent.get("bedrock_agentcore", {}).get("agent_arn", "")
-        if not mcp_arn:
-            print("ERROR: MCP runtime ARN not found in .bedrock_agentcore.yaml", file=sys.stderr)
-            sys.exit(1)
-
-    encoded_arn = urllib.parse.quote(mcp_arn, safe="")
-    endpoint_uri = f"https://bedrock-agentcore.{REGION}.amazonaws.com/runtimes/{encoded_arn}/invocations"
-
-    print(f"  MCP Runtime ARN: {mcp_arn}")
-    print(f"  MCP Endpoint URI: {endpoint_uri}")
-    return mcp_arn, endpoint_uri
-
-
-def step1_cognito_pool(cognito: object, prev: dict) -> str:
-    """Create or reuse a Cognito User Pool."""
-    print("\nStep 1: Setting up Cognito User Pool...")
-
-    saved_id = prev.get("cognitoPoolId")
-    if saved_id:
-        print(f"  Reusing pool from gateway_output.json: {saved_id}")
-        return saved_id
-
-    resp = cognito.list_user_pools(MaxResults=60)
-    for pool in resp.get("UserPools", []):
-        if pool["Name"] == COGNITO_POOL_NAME:
-            print(f"  Found existing pool: {pool['Id']}")
-            return pool["Id"]
-
-    resp = cognito.create_user_pool(PoolName=COGNITO_POOL_NAME)
-    pool_id = resp["UserPool"]["Id"]
-    print(f"  Created pool: {pool_id}")
-    return pool_id
-
-
-def step2_cognito_domain(cognito: object, pool_id: str) -> str:
-    """Create Cognito domain (required for token endpoint)."""
-    domain_prefix = f"sage-mcp-{pool_id.split('_')[-1]}".lower()
-    print(f"\nStep 2: Setting up Cognito domain: {domain_prefix}")
-
-    try:
-        cognito.create_user_pool_domain(Domain=domain_prefix, UserPoolId=pool_id)
-        print("  Created domain.")
-    except cognito.exceptions.InvalidParameterException:
-        print("  Domain already exists, continuing...")
-    except Exception as e:
-        print(f"  Domain setup note: {e}")
-
-    return domain_prefix
-
-
-def step3_resource_server(cognito: object, pool_id: str) -> None:
-    """Create or update the Cognito resource server with custom scope."""
-    print("\nStep 3: Creating Cognito resource server...")
-
-    scopes = [{"ScopeName": SCOPE_NAME, "ScopeDescription": "Access to Sage MCP tools"}]
-
-    try:
-        cognito.describe_resource_server(UserPoolId=pool_id, Identifier=RESOURCE_SERVER_ID)
-        print("  Resource server exists, updating...")
-        cognito.update_resource_server(
-            UserPoolId=pool_id, Identifier=RESOURCE_SERVER_ID,
-            Name="Sage MCP Server", Scopes=scopes,
-        )
-    except cognito.exceptions.ResourceNotFoundException:
-        print("  Creating resource server...")
-        cognito.create_resource_server(
-            UserPoolId=pool_id, Identifier=RESOURCE_SERVER_ID,
-            Name="Sage MCP Server", Scopes=scopes,
-        )
-
-    print(f"  Resource server: {RESOURCE_SERVER_ID} (scope: {FULL_SCOPE})")
-
-
-def step4_m2m_client(cognito: object, pool_id: str) -> tuple[str, str]:
-    """Create or reuse the M2M app client with client_credentials grant."""
-    print("\nStep 4: Creating Cognito M2M app client...")
-
-    resp = cognito.list_user_pool_clients(UserPoolId=pool_id, MaxResults=60)
-    for c in resp.get("UserPoolClients", []):
-        if c["ClientName"] == M2M_CLIENT_NAME:
-            client_id = c["ClientId"]
-            print(f"  Reusing existing M2M client: {client_id}")
-            desc = cognito.describe_user_pool_client(UserPoolId=pool_id, ClientId=client_id)
-            secret = desc["UserPoolClient"].get("ClientSecret", "")
-            return client_id, secret
-
-    print(f"  Creating new M2M app client: {M2M_CLIENT_NAME}")
-    resp = cognito.create_user_pool_client(
-        UserPoolId=pool_id,
-        ClientName=M2M_CLIENT_NAME,
-        GenerateSecret=True,
-        AllowedOAuthFlows=["client_credentials"],
-        AllowedOAuthScopes=[FULL_SCOPE],
-        AllowedOAuthFlowsUserPoolClient=True,
-    )
-    client_id = resp["UserPoolClient"]["ClientId"]
-    secret = resp["UserPoolClient"].get("ClientSecret", "")
-    print(f"  Created M2M client: {client_id}")
-    return client_id, secret
-
-
-def step5_credential_provider(
-    pool_id: str, discovery_url: str, client_id: str, client_secret: str,
+def compose_mcp_runtime_invocation_url(
+    region: str, runtime_arn: str, qualifier: str
 ) -> str:
-    """Create AgentCore OAuth2 credential provider via boto3."""
-    print("\nStep 5: Creating AgentCore OAuth2 credential provider...")
+    """Compose the exact deployed MCP Runtime invocation URL.
 
-    ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
+    Args:
+        region: AWS Region containing the deployed Runtime.
+        runtime_arn: Deployed MCP Runtime ARN.
+        qualifier: Deployed Runtime qualifier.
 
-    # Check if it already exists
-    try:
-        resp = ac.list_oauth2_credential_providers()
-        for p in resp.get("credentialProviders", []):
-            if p.get("name") == CREDENTIAL_PROVIDER_NAME:
-                arn = p["credentialProviderArn"]
-                print(f"  Reusing existing credential provider: {arn}")
-                return arn
-    except Exception as e:
-        print(f"  Note: Could not list credential providers: {e}")
+    Returns:
+        The exact AgentCore Runtime invocation URL.
 
-    # Create new credential provider using CustomOauth2 with Cognito discovery URL
-    print(f"  Creating credential provider: {CREDENTIAL_PROVIDER_NAME}")
-    resp = ac.create_oauth2_credential_provider(
-        name=CREDENTIAL_PROVIDER_NAME,
-        credentialProviderVendor="CustomOauth2",
-        oauth2ProviderConfigInput={
-            "customOauth2ProviderConfig": {
-                "oauthDiscovery": {
-                    "discoveryUrl": discovery_url,
-                },
-                "clientId": client_id,
-                "clientSecret": client_secret,
-            }
-        },
+    Raises:
+        ValueError: If any component is missing or the ARN is not a Runtime in
+            the supplied Region.
+    """
+    if not region.strip():
+        raise ValueError("region must be a non-empty string")
+    if not qualifier.strip():
+        raise ValueError("mcpRuntimeQualifier must be a non-empty string")
+
+    arn_parts = runtime_arn.split(":", 5)
+    if (
+        len(arn_parts) != 6
+        or arn_parts[0] != "arn"
+        or arn_parts[2] != "bedrock-agentcore"
+        or arn_parts[3] != region
+        or not arn_parts[4]
+        or not arn_parts[5].startswith("runtime/")
+        or not arn_parts[5].removeprefix("runtime/")
+    ):
+        raise ValueError("mcpRuntimeArn must be a deployed AgentCore Runtime ARN in region")
+
+    encoded_arn = urllib.parse.quote(runtime_arn, safe="")
+    encoded_qualifier = urllib.parse.quote(qualifier, safe="")
+    return (
+        f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/"
+        f"{encoded_arn}/invocations?qualifier={encoded_qualifier}"
     )
-    arn = resp["credentialProviderArn"]
-    print(f"  Credential Provider ARN: {arn}")
-    return arn
 
 
-def step6_gateway(prev: dict) -> tuple[str, str, str, str]:
-    """Create or reuse the AgentCore Gateway with semantic search."""
-    print("\nStep 6: Creating AgentCore Gateway...")
-
-    ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
-
-    if prev.get("gatewayArn"):
-        print(f"  Reusing existing gateway from gateway_output.json")
-        arn = prev["gatewayArn"]
-        gw_id = prev["gatewayId"]
-        url = prev["gatewayUrl"]
-        role = prev.get("roleArn", "")
-        print(f"  Gateway ARN: {arn}")
-        print(f"  Gateway URL: {url}")
-        return arn, gw_id, url, role
-
-    # Resolve the gateway execution role
-    iam = boto3.client("iam")
-    try:
-        role_arn = iam.get_role(RoleName="AgentCoreGatewayExecutionRole")["Role"]["Arn"]
-    except Exception as e:
-        print(f"ERROR: Could not find AgentCoreGatewayExecutionRole: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Check if gateway already exists
-    resp = ac.list_gateways()
-    for gw in resp.get("gateways", []):
-        if gw.get("name") == GATEWAY_NAME:
-            arn = gw["gatewayArn"]
-            gw_id = arn.rsplit("/", 1)[-1]
-            url = gw.get("gatewayUrl", f"https://{gw_id}.gateway.bedrock-agentcore.{REGION}.amazonaws.com/mcp")
-            print(f"  Found existing gateway: {arn}")
-            return arn, gw_id, url, role_arn
-
-    print(f"  Creating new gateway: {GATEWAY_NAME}")
-    resp = ac.create_gateway(
-        name=GATEWAY_NAME,
-        roleArn=role_arn,
-        protocolType="MCP",
-        protocolConfiguration={
-            "mcp": {
-                "searchType": "SEMANTIC",
-            }
-        },
-        authorizerType="NONE",
-    )
-    arn = resp["gatewayArn"]
-    gw_id = arn.rsplit("/", 1)[-1]
-    url = resp.get("gatewayUrl", f"https://{gw_id}.gateway.bedrock-agentcore.{REGION}.amazonaws.com/mcp")
-
-    print(f"  Gateway ARN: {arn}")
-    print(f"  Gateway ID: {gw_id}")
-    print(f"  Gateway URL: {url}")
-    return arn, gw_id, url, role_arn
-
-
-def step7_gateway_target(
-    gateway_id: str, mcp_endpoint_uri: str, credential_provider_arn: str,
-) -> str:
-    """Add MCP server as gateway target with OAuth M2M credentials."""
-    print("\nStep 7: Adding MCP server target with OAuth M2M credentials...")
-
-    ac = boto3.client("bedrock-agentcore-control", region_name=REGION)
-
-    # List existing targets — response key is "items"
-    deleted_any = False
-    try:
-        existing = ac.list_gateway_targets(gatewayIdentifier=gateway_id)
-        for t in existing.get("items", []):
-            tid = t["targetId"]
-            status = t.get("status", "")
-            print(f"  Found existing target '{t['name']}' (ID: {tid}, status: {status}), deleting...")
-            ac.delete_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
-            print(f"  Deleted {tid}.")
-            deleted_any = True
-    except Exception as e:
-        print(f"  Note: Could not clean up existing targets: {e}")
-
-    # Wait for deletions to propagate before creating
-    if deleted_any:
-        print("  Waiting for target deletions to propagate...", end="", flush=True)
-        for _ in range(30):
-            time.sleep(3)
-            print(".", end="", flush=True)
-            try:
-                remaining = ac.list_gateway_targets(gatewayIdentifier=gateway_id).get("items", [])
-                if not remaining:
-                    break
-            except Exception:
-                break
-        print(" done.")
-
-    # Create target with correct AgentCore OAuth2 credential provider ARN
-    resp = ac.create_gateway_target(
-        gatewayIdentifier=gateway_id,
-        name=TARGET_NAME,
-        description="FastMCP server hosting Sage context tools and data tools",
-        targetConfiguration={
-            "mcp": {"mcpServer": {"endpoint": mcp_endpoint_uri}},
-        },
-        credentialProviderConfigurations=[
-            {
-                "credentialProviderType": "OAUTH",
-                "credentialProvider": {
-                    "oauthCredentialProvider": {
-                        "providerArn": credential_provider_arn,
-                        "grantType": "CLIENT_CREDENTIALS",
-                        "scopes": [FULL_SCOPE],
-                    }
-                },
-            }
-        ],
-        metadataConfiguration={
-            "allowedRequestHeaders": [
-                "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id",
-            ]
-        },
-    )
-    target_id = resp.get("targetId", "unknown")
-    print(f"  Created MCP target: {target_id}")
-    print(f"  Target status: {resp.get('status', 'unknown')}")
-
-    # Synchronize
-    print("  Synchronizing gateway targets...")
-    try:
-        ac.synchronize_gateway_targets(gatewayIdentifier=gateway_id, targetIdList=[target_id])
-        print("  Target synchronization initiated.")
-    except Exception as e:
-        print(f"  Warning: Target sync failed (may complete async): {e}")
-
-    return target_id
-
-
-def step8_save_outputs(
-    gateway_arn: str, gateway_id: str, gateway_url: str, role_arn: str,
-    mcp_arn: str, mcp_endpoint_uri: str, pool_id: str,
-    m2m_client_id: str, m2m_client_secret: str, credential_provider_arn: str,
+def validate_passthrough_target(
+    target: Mapping[str, Any],
+    *,
+    region: str,
+    runtime_arn: str,
+    qualifier: str,
 ) -> None:
-    """Save all deployment outputs to gateway_output.json."""
-    print("\nStep 8: Saving deployment outputs...")
-
-    domain_prefix = f"sage-mcp-{pool_id.split('_')[-1]}".lower()
-    token_endpoint = f"https://{domain_prefix}.auth.{REGION}.amazoncognito.com/oauth2/token"
-
-    output = {
-        "gatewayArn": gateway_arn,
-        "gatewayId": gateway_id,
-        "gatewayUrl": gateway_url,
-        "roleArn": role_arn,
-        "mcpServerArn": mcp_arn,
-        "mcpEndpointUri": mcp_endpoint_uri,
-        "cognitoPoolId": pool_id,
-        "cognitoResourceServerId": RESOURCE_SERVER_ID,
-        "cognitoM2mClientId": m2m_client_id,
-        "cognitoM2mClientSecret": m2m_client_secret,
-        "cognitoTokenEndpoint": token_endpoint,
-        "cognitoScope": FULL_SCOPE,
-        "credentialProviderArn": credential_provider_arn,
-        "region": REGION,
+    """Reject any target that is not the exact HTTP MCP passthrough shape."""
+    expected_endpoint = compose_mcp_runtime_invocation_url(
+        region, runtime_arn, qualifier
+    )
+    expected_configuration = {
+        "http": {
+            "passthrough": {
+                "endpoint": expected_endpoint,
+                "protocolType": "MCP",
+            }
+        }
     }
-    OUTPUT_FILE.write_text(json.dumps(output, indent=2) + "\n")
-    print(f"  Saved to: {OUTPUT_FILE}")
+    if target.get("targetConfiguration") != expected_configuration:
+        raise ValueError(
+            "target must be HTTP passthrough protocolType MCP with the exact qualified Runtime endpoint"
+        )
+    if target.get("credentialProviderConfigurations") != _TARGET_CREDENTIALS:
+        raise ValueError("target credential provider must be exactly JWT_PASSTHROUGH")
+
+
+def render_gateway_targets(
+    configuration: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Render exactly two validated lane-local HTTP MCP target requests."""
+    region = _required_text(configuration, "region")
+    raw_lanes = configuration.get("lanes")
+    if not isinstance(raw_lanes, list) or not all(
+        isinstance(lane, dict) for lane in raw_lanes
+    ):
+        raise ValueError("lanes must be a list of records")
+
+    lane_ids = {
+        lane.get("laneId") for lane in raw_lanes if isinstance(lane, dict)
+    }
+    if len(raw_lanes) != 2 or lane_ids != _REQUIRED_LANES:
+        raise ValueError("configuration must contain exactly Tenant_A and Tenant_B")
+
+    gateway_ids = [_required_text(lane, "gatewayId") for lane in raw_lanes]
+    runtime_arns = [_required_text(lane, "mcpRuntimeArn") for lane in raw_lanes]
+    if len(set(gateway_ids)) != 2:
+        raise ValueError("gatewayId values must be distinct")
+    if len(set(runtime_arns)) != 2:
+        raise ValueError("mcpRuntimeArn values must be distinct")
+
+    targets: list[dict[str, Any]] = []
+    for lane in sorted(raw_lanes, key=lambda item: item["laneId"]):
+        lane_id = _required_text(lane, "laneId")
+        runtime_arn = _required_text(lane, "mcpRuntimeArn")
+        qualifier = _required_text(lane, "mcpRuntimeQualifier")
+        endpoint = compose_mcp_runtime_invocation_url(region, runtime_arn, qualifier)
+        target = {
+            "gatewayIdentifier": _required_text(lane, "gatewayId"),
+            "name": f"sage-mcp-{lane_id.lower().replace('_', '-')}",
+            "description": f"{lane_id} Sage MCP Runtime HTTP passthrough",
+            "targetConfiguration": {
+                "http": {
+                    "passthrough": {
+                        "endpoint": endpoint,
+                        "protocolType": "MCP",
+                    }
+                }
+            },
+            "credentialProviderConfigurations": [
+                {"credentialProviderType": "JWT_PASSTHROUGH"}
+            ],
+        }
+        validate_passthrough_target(
+            target,
+            region=region,
+            runtime_arn=runtime_arn,
+            qualifier=qualifier,
+        )
+        targets.append({"laneId": lane_id, **target})
+
+    return targets
+
+
+def apply_gateway_authorizer(
+    client: Any, gateway_id: str, authorizer: Mapping[str, Any]
+) -> None:
+    """Replace one existing Gateway's inbound policy and verify the readback."""
+    current = client.get_gateway(gatewayIdentifier=gateway_id)
+    client.update_gateway(
+        gatewayIdentifier=gateway_id,
+        name=_required_text(current, "name"),
+        roleArn=_required_text(current, "roleArn"),
+        protocolType=_required_text(current, "protocolType"),
+        authorizerType="CUSTOM_JWT",
+        authorizerConfiguration=dict(authorizer),
+    )
+    updated = client.get_gateway(gatewayIdentifier=gateway_id)
+    if (
+        updated.get("authorizerType") != "CUSTOM_JWT"
+        or updated.get("authorizerConfiguration") != authorizer
+    ):
+        raise ValueError("Gateway managed authorizer readback does not match its lane")
+
+
+def deploy_gateway_targets(
+    configuration: Mapping[str, Any],
+    client: Any | None = None,
+    *,
+    retrieval_date: date | None = None,
+) -> list[dict[str, Any]]:
+    """Apply lane authorizers, create targets, and verify deployed evidence."""
+    region = _required_text(configuration, "region")
+    agentcore = client or boto3.client(
+        "bedrock-agentcore-control", region_name=region
+    )
+    gateway_authorizers = {
+        item["laneId"]: item for item in render_deployments(dict(configuration), "gateway")
+    }
+    outputs: list[dict[str, Any]] = []
+    lane_records = {
+        _required_text(lane, "laneId"): lane
+        for lane in configuration["lanes"]
+    }
+    for rendered in render_gateway_targets(configuration):
+        lane_id = rendered["laneId"]
+        request = {key: value for key, value in rendered.items() if key != "laneId"}
+        apply_gateway_authorizer(
+            agentcore,
+            request["gatewayIdentifier"],
+            gateway_authorizers[lane_id]["authorizerConfig"],
+        )
+        response = agentcore.create_gateway_target(**request)
+        target_id = response["targetId"]
+        deployed = agentcore.get_gateway_target(
+            gatewayIdentifier=request["gatewayIdentifier"], targetId=target_id
+        )
+        lane = lane_records[lane_id]
+        validate_passthrough_target(
+            deployed,
+            region=region,
+            runtime_arn=_required_text(lane, "mcpRuntimeArn"),
+            qualifier=_required_text(lane, "mcpRuntimeQualifier"),
+        )
+        expected_endpoint = request["targetConfiguration"]["http"]["passthrough"][
+            "endpoint"
+        ]
+        evidence = record_target_capability_evidence(
+            lane_id,
+            deployed,
+            expected_endpoint,
+            retrieval_date=retrieval_date,
+        )
+        verify_target_capability_evidence(evidence)
+        outputs.append(
+            {
+                "laneId": lane_id,
+                "gatewayId": request["gatewayIdentifier"],
+                "targetId": target_id,
+                "status": deployed.get("status", response.get("status", "unknown")),
+                "mcpRuntimeInvocationUrl": expected_endpoint,
+                "targetEvidence": {
+                    "targetType": evidence.target_type,
+                    "documentationUrls": [
+                        evidence.documentation_url,
+                        evidence.jwt_passthrough_documentation_url,
+                    ],
+                    "retrievalDate": evidence.retrieval_date.isoformat(),
+                    "deployedConfigurationEvidence": (
+                        evidence.deployed_configuration_evidence
+                    ),
+                    "protocolType": evidence.protocol_type,
+                    "credentialProviderType": evidence.credential_provider_type,
+                    "endpoint": evidence.endpoint,
+                    "expectedEndpoint": evidence.expected_endpoint,
+                    "endpointMatches": evidence.endpoint_matches,
+                },
+            }
+        )
+    return outputs
 
 
 def main() -> None:
-    """Run all deployment steps."""
-    print("=== Deploying Sage AgentCore Gateway ===")
-    print(f"Region: {REGION}\n")
-
-    prev = load_previous_output()
-    cognito = boto3.client("cognito-idp", region_name=REGION)
-
-    # Step 0: Resolve MCP ARN
-    mcp_arn, mcp_endpoint_uri = step0_resolve_mcp_arn()
-
-    # Step 1: Cognito User Pool
-    pool_id = step1_cognito_pool(cognito, prev)
-    discovery_url = f"https://cognito-idp.{REGION}.amazonaws.com/{pool_id}/.well-known/openid-configuration"
-    print(f"  Discovery URL: {discovery_url}")
-
-    # Step 2: Cognito domain
-    step2_cognito_domain(cognito, pool_id)
-
-    # Step 3: Resource server
-    step3_resource_server(cognito, pool_id)
-
-    # Step 4: M2M client
-    m2m_client_id, m2m_client_secret = step4_m2m_client(cognito, pool_id)
-
-    # Step 5: Credential provider
-    credential_provider_arn = step5_credential_provider(
-        pool_id, discovery_url, m2m_client_id, m2m_client_secret,
+    """Render locally or deploy the exact two-lane target configuration."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(
+            os.environ.get("SAGE_IDENTITY_CONFIG_FILE", DEFAULT_CONFIG_FILE)
+        ),
     )
+    parser.add_argument("--render", action="store_true")
+    args = parser.parse_args()
 
-    # Step 6: Gateway
-    gateway_arn, gateway_id, gateway_url, role_arn = step6_gateway(prev)
+    configuration = json.loads(args.config.read_text(encoding="utf-8"))
+    if args.render:
+        print(json.dumps(render_gateway_targets(configuration), sort_keys=True))
+        return
 
-    # Step 7: Gateway target
-    step7_gateway_target(gateway_id, mcp_endpoint_uri, credential_provider_arn)
-
-    # Step 8: Save outputs
-    step8_save_outputs(
-        gateway_arn, gateway_id, gateway_url, role_arn,
-        mcp_arn, mcp_endpoint_uri, pool_id,
-        m2m_client_id, m2m_client_secret, credential_provider_arn,
+    outputs = deploy_gateway_targets(configuration)
+    OUTPUT_FILE.write_text(
+        json.dumps(
+            {"region": _required_text(configuration, "region"), "lanes": outputs},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
-
-    print("\n=== Gateway deployment complete ===\n")
-    print(f"  Gateway:             {gateway_id}")
-    print(f"  Gateway URL:         {gateway_url}")
-    print(f"  MCP Server Target:   {TARGET_NAME} (OAuth M2M)")
-    print(f"  Cognito Pool:        {pool_id}")
-    print(f"  Credential Provider: {credential_provider_arn}")
-    print(f"\nNext steps:")
-    print(f"  1. Redeploy MCP server with JWT inbound auth:")
-    print(f"     bash scripts/deploy_mcp.sh")
-    print(f"  2. Deploy the agent:")
-    print(f"     bash scripts/deploy_agent.sh")
-    print(f"  3. Get a bearer token for the frontend:")
-    print(f"     uv run agentcore identity get-cognito-inbound-token --region {REGION}")
+    print(f"Created {len(outputs)} HTTP MCP passthrough targets.")
 
 
 if __name__ == "__main__":

@@ -16,11 +16,10 @@ frontend/.git/
 frontend/tsconfig*.tsbuildinfo
 
 # ── Secrets & local config ────────────────────────────────────────────
-# Bearer token + agent URL — regenerate with: uv run python scripts/get_token.py
+# Local browser identity and endpoint configuration; never commit.
 frontend/.env.local
 
-# Live AWS resource ARNs, Cognito client IDs/secrets written by deploy_gateway.py
-# Regenerate by re-running: bash scripts/deploy_gateway.sh
+# Generated Gateway target readback; never commit deployment identifiers or credentials.
 scripts/gateway_output.json
 
 # Cognito tenant pool IDs, app client IDs, and demo user credentials written by deploy_user_pool.py
@@ -34,8 +33,50 @@ scripts/user_pool_output.json
 .bedrock_agentcore.yaml
 .bedrock_agentcore/
 
+# ── Walkthroughs ──────────────────────────────────────────────────────
+walkthroughs/
+
 # ── IDE / OS ──────────────────────────────────────────────────────────
 .DS_Store
 .vscode/
 *.swp
 *.swo
+
+# Local tooling and generated artifacts
+.hypothesis/
+.pi/
+.serena/
+.specs/
+.kiro/references/
+.kiro/settings/
+kiro-markdown-style/
+*.vsix
+
+# Generic secret-bearing files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.credentials
+credentials.json
+service-account*.json
+*-credentials.json
+.npmrc
+.pypirc
+secrets/
+keys/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+
+# Generated deployment and local spec evidence
+scripts/registry_output.json
+.kiro/specs/multi-tenant-agent-identity/.config.kiro
+.kiro/specs/multi-tenant-agent-identity/task-*.json
+.kiro/specs/multi-tenant-agent-identity/tasks.meta.json

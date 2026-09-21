@@ -1,14 +1,11 @@
-"""In-memory mock data for the Sage AI Assistant MCP server.
+"""In-memory demo data owned by the shared Sage API boundary.
 
-Structured as a dict keyed by tenant ID. Each tenant has isolated
-products and claims — tenants share domain skills but never share data.
-
-Tenant IDs match the values passed via the
-``X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id`` header.
+Only the Sage API HTTP boundary imports this store. Tenant selection comes from
+an independently verified access-token claim before any lookup.
 """
 
-MOCK_DATA: dict = {
-    "axa": {
+MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
+    "Tenant_A": {
         "products": [
             {
                 "product_id": "AXA-MOT-001",
@@ -54,7 +51,7 @@ MOCK_DATA: dict = {
             },
         ],
     },
-    "allianz": {
+    "Tenant_B": {
         "products": [
             {
                 "product_id": "ALZ-MOT-001",

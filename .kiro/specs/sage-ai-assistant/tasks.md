@@ -47,7 +47,7 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - _Requirements: 3.1, 3.2, 3.4, 3.5, 6.2, 6.3, 7.4, 12.Phase1.1, 12.Phase1.2, 12.Phase1.3, 12.Phase1.4, 12.Phase1.5, 12.Phase1.6, 12.Phase1.7_
 
 - [x] 5. Mock data and data tools (local)
-  - [x] 5.1 Create `mcp_server/mock_data.py` — `MOCK_DATA` dict keyed by tenant ID (`"axa"`, `"allianz"`) with distinct products (motor insurance with different names, premiums, coverage, discounts) and claims (different claim IDs, statuses, amounts)
+  - [x] 5.1 Create `sage_api/mock_data.py` — `MOCK_DATA` dict keyed by tenant ID (`"Tenant_A"`, `"Tenant_B"`) with distinct products (motor insurance with different names, premiums, coverage, discounts) and claims (different claim IDs, statuses, amounts)
   - [x] 5.2 Create shared data models module — `TenantId` enum, `ProductInfo`, `ClaimDetails`, `ToolError` dataclasses as defined in the design document
   - [x] 5.3 Implement `mcp_server/tools/data_tools.py` — `get_product_info(product_type)` and `get_claim_details(claim_reference)` tools with `@mcp.tool()` decorator, descriptive tool descriptions, tenant header extraction via `CurrentHeaders()` from `fastmcp.dependencies` (not `None` default — FastMCP only injects headers when `CurrentHeaders()` is the default value), data filtering by tenant, and error handling (missing header → "invalid_tenant", unknown tenant → "invalid_tenant", claim not found → "not_found")
   - [x] 5.4 Register data tools in `mcp_server/server.py` — import from `data_tools.py` so all 4 tools are exposed
@@ -63,11 +63,11 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - _Requirements: 3.3, 4.1, 4.2, 4.3, 4.4, 6.6, 8.3, 8.4, 9.6_
 
 - [x] 7. Phase 2: JWT authentication
-  - [x] 7.1 Create Cognito User Pool (`sage-tenant-pool`) with 2 app clients: `sage-axa-client` (custom attribute `tenant_id: axa`) and `sage-allianz-client` (custom attribute `tenant_id: allianz`), token claims include `custom:tenant_id`
+  - [x] 7.1 Create Cognito User Pool (`sage-tenant-pool`) with 2 app clients: `sage-tenant-a-client` (custom attribute `tenant_id: Tenant_A`) and `sage-tenant-b-client` (custom attribute `tenant_id: Tenant_B`), token claims include `custom:tenant_id`
   - [x] 7.2 Configure AgentCore Identity with credential provider for JWT validation from the Cognito User Pool
   - [x] 7.3 Update `agent/agent.py` to extract `tenant_id` from JWT `custom:tenant_id` claim when present, and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation (fallback to direct header for Phase 1 compatibility)
   - [x] 7.4 Update React frontend to authenticate against tenant-specific Cognito app client, obtain JWT, and send via `Authorization` header in the AgentCore Client's POST to `/invocations`
-  - [x] 7.5 Verify: login as AXA user → JWT contains `custom:tenant_id: axa` → agent extracts tenant from JWT → data tools return AXA data; same for Allianz
+  - [x] 7.5 Verify: login as AXA user → JWT contains `custom:tenant_id: Tenant_A` → agent extracts tenant from JWT → data tools return AXA data; same for Allianz
   - _Requirements: 12.Phase2.1, 12.Phase2.2, 12.Phase2.3, 12.Phase2.4_
 
 - [ ] 8. Phase 2: Bedrock Guardrails
