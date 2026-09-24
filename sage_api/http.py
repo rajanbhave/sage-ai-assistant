@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
+import jwt
+
 from sage_identity import (
     AllowedTenantIssuerMap,
     ApiIssuerConfiguration,
@@ -26,6 +28,45 @@ from .identity import VerifiedApiIdentity, validate_access_token
 from .mock_data import MOCK_DATA
 
 logger = logging.getLogger(__name__)
+# The audit event is the Sage API's only evidence that a request was authorized,
+# so it must reach CloudWatch. Lambda leaves the root logger at WARNING, which
+# would silently drop every INFO audit record.
+logger.setLevel(logging.INFO)
+
+
+def _audit_payload(fields: Mapping[str, object]) -> str:
+    """Render one audit event as a compact, greppable, credential-free string.
+
+    The fields are placed in the log message itself rather than in ``extra``
+    because Lambda's default formatter discards unknown record attributes, which
+    would strip the correlation ID, subject, tenant, and outcome an auditor needs.
+    ``serialize_log_fields`` redacts authentication artifacts, so no bearer value
+    can reach the log.
+    """
+    return json.dumps(
+        serialize_log_fields(fields), sort_keys=True, separators=(",", ":")
+    )
+
+
+def _keys_by_id(jwks: object) -> dict[str, object]:
+    """Build a key-identifier map from one issuer's published JWKS.
+
+    Cognito serves the pool's public signing keys at its JWKS endpoint, so
+    deployment configuration carries that document unchanged and no private or
+    secret material is involved.
+    """
+    keys = jwks.get("keys") if isinstance(jwks, Mapping) else jwks
+    if not isinstance(keys, list) or not keys:
+        raise ValueError("Sage API issuer keys must be a non-empty JWKS")
+
+    selected: dict[str, object] = {}
+    for key in keys:
+        if not isinstance(key, Mapping) or not isinstance(key.get("kid"), str):
+            raise ValueError("each JWKS entry requires a string key identifier")
+        selected[str(key["kid"])] = jwt.algorithms.RSAAlgorithm.from_jwk(
+            json.dumps(dict(key))
+        )
+    return selected
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +132,7 @@ class SageApiApplication:
         )
         return cls(
             issuers,
-            raw_keys,
+            {issuer: _keys_by_id(jwks) for issuer, jwks in raw_keys.items()},
             frozenset(
                 path.strip()
                 for path in os.environ.get("SAGE_API_APPROVED_SOURCES", "").split(",")
@@ -166,11 +207,11 @@ class SageApiApplication:
 
     @staticmethod
     def _audit(identity: VerifiedApiIdentity, correlation: CorrelationId, outcome: str) -> None:
-        logger.info("Sage API request", extra={"sage_api": serialize_log_fields({"correlation_id": correlation, "subject": identity.subject, "tenant_id": identity.tenant_id, "outcome": outcome})})
+        logger.info("Sage API request %s", _audit_payload({"correlation_id": correlation, "subject": identity.subject, "tenant_id": identity.tenant_id, "outcome": outcome}))
 
     @staticmethod
     def _audit_error(error: IdentityError) -> None:
-        logger.warning("Sage API request failed", extra={"sage_api": serialize_log_fields({"correlation_id": error.correlation_id, "outcome": error.code.value})})
+        logger.warning("Sage API request failed %s", _audit_payload({"correlation_id": error.correlation_id, "outcome": error.code.value}))
 
 
 def create_application(
@@ -188,7 +229,26 @@ def application(environ: Mapping[str, object], start_response: Callable) -> list
     """WSGI entrypoint; configuration is loaded once from deployment state."""
     global _application
     if _application is None:
-        _application = SageApiApplication.from_environment()
+        try:
+            _application = SageApiApplication.from_environment()
+        except Exception:
+            # Deployment configuration is invalid. Fail closed with a safe body
+            # rather than letting the construction error escape the caller.
+            logger.exception("Sage API configuration is invalid")
+            error = IdentityError(
+                IdentityErrorCode.REQUEST_FAILED, CorrelationId.new()
+            )
+            payload = json.dumps(
+                serialize_identity_error(error), separators=(",", ":")
+            ).encode("utf-8")
+            start_response(
+                "500 Internal Server Error",
+                [
+                    ("Content-Type", "application/json"),
+                    ("Content-Length", str(len(payload))),
+                ],
+            )
+            return [payload]
     return _application(environ, start_response)
 
 

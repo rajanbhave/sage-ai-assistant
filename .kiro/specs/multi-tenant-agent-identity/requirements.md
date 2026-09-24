@@ -10,7 +10,7 @@ The shared Sage API allowlists exactly the two demo tenant issuers. The Sage API
 
 Route C does not introduce token exchange, downstream machine credentials, an on-behalf-of flow, a context-token broker, a second signed context token, or workload-token use. The language model does not receive authentication artifacts, and no component logs token values. Sage MCP and Sage API remain responsible for application tenant and permission checks, and Sage API remains the data-access and row-level-security boundary.
 
-The proof of concept admits only an AgentCore Gateway HTTP passthrough target configured with `protocolType: MCP` and `JWT_PASSTHROUGH`. The target endpoint is the invocation URL of the separately hosted Sage MCP Runtime. Each Runtime or Gateway custom JWT authorizer has one OIDC discovery URL.
+The proof of concept admits only an AgentCore Gateway HTTP passthrough target configured with `protocolType: MCP` and `JWT_PASSTHROUGH`. The target endpoint is the MCP_Runtime_Base_URL of the separately hosted Sage MCP Runtime, with the deployed qualifier supplied as a static query parameter; the Gateway appends the `invocations` path segment from the Gateway_Target_Invocation_URL. Each Runtime or Gateway custom JWT authorizer has one OIDC discovery URL.
 
 ### Task 14 simplification amendment
 
@@ -119,10 +119,12 @@ The Sage proof of concept selects Route C because it matches the existing same-J
 - **Gateway_JWT_Authorizer**: An AgentCore Gateway custom JWT authorizer configured with exactly one Tenant Discovery URL from the same Tenant Route C Lane, the Lane Trusted Client Set, the Gateway Required Door Scope, and fixed `customClaims` requiring `token_use EQUALS access` and `custom:tenant_id EQUALS Expected_Lane_Tenant_Value`.
 - **Proposed_Route_C_Configuration**: A candidate two-lane Route C issuer, lane, authorizer, scope, token-lifetime, target, API issuer-map, or routing configuration that is inactive until every applicable validation succeeds.
 - **Last_Valid_Route_C_Configuration**: The most recently accepted two-lane Route C configuration; no such configuration exists before the first proposal is accepted.
-- **Compatible_Passthrough_Target**: For this specification, an AgentCore Gateway HTTP passthrough target whose `targetConfiguration.http.passthrough.protocolType` equals `MCP`, whose credential-provider entry has `credentialProviderType` equal to `JWT_PASSTHROUGH`, and whose endpoint resolves to the separately hosted Sage MCP Runtime invocation endpoint.
+- **Compatible_Passthrough_Target**: For this specification, an AgentCore Gateway HTTP passthrough target whose `targetConfiguration.http.passthrough.protocolType` equals `MCP`, whose credential-provider entry has `credentialProviderType` equal to `JWT_PASSTHROUGH`, and whose endpoint equals the MCP_Runtime_Base_URL of the separately hosted Sage MCP Runtime with the deployed qualifier supplied as a static query parameter.
 - **Semantic_MCP_Target**: An AgentCore Gateway semantic MCP target; this target type is excluded from Route C because this specification requires the HTTP passthrough target form.
 - **Route_C_Compatible_Topology**: A tenant-lane Gateway-to-Sage-MCP topology using a Compatible Passthrough Target whose HTTP endpoint invokes the separately hosted Sage MCP Runtime.
-- **MCP_Runtime_Invocation_URL**: The documented Sage MCP Runtime invocation URL composed from the deployed AWS Region, URL-encoded Sage MCP Runtime ARN, and deployed qualifier.
+- **MCP_Runtime_Base_URL**: The Sage MCP Runtime base URL composed from the deployed AWS Region and URL-encoded Sage MCP Runtime ARN, carrying neither the `invocations` path segment nor a query string. This is the value configured as the passthrough target endpoint.
+- **MCP_Runtime_Invocation_URL**: The documented Sage MCP Runtime invocation URL that the Gateway produces downstream, composed from the MCP_Runtime_Base_URL, the appended `invocations` path segment, and the deployed qualifier supplied as a static query parameter.
+- **Gateway_Target_Invocation_URL**: The Gateway-side URL the Agent Application calls, composed from the lane Gateway URL, the target name, and the `invocations` path segment. A passthrough target forwards `/{targetName}/{path}` to `{endpoint}/{path}`, so the endpoint MUST NOT carry a query string; a query string on the endpoint would be split by the appended path.
 - **Rollback_Route_C_Topology**: The last verified target and Gateway routing configuration preserved separately for one Tenant Route C Lane while a candidate topology is evaluated or activated.
 - **JWT_PASSTHROUGH**: The Gateway target authorization mode that forwards the inbound bearer JWT to the downstream target without changing the token.
 - **Authorization_Header**: The single HTTP `Authorization: Bearer <User_Access_Token>` header used between Route C Doors.
@@ -347,7 +349,7 @@ The Sage proof of concept selects Route C because it matches the existing same-J
 2. WHEN a candidate target is evaluated for a Tenant_Route_C_Lane, THE Multi_Tenant_Agent_Identity_System SHALL record the current official AWS documentation reference and retrieval date supporting Gateway HTTP passthrough with `protocolType: MCP` and `JWT_PASSTHROUGH`.
 3. WHEN a candidate Compatible_Passthrough_Target is evaluated before activation, THE Multi_Tenant_Agent_Identity_System SHALL verify that the deployed target type is Gateway HTTP passthrough and that `targetConfiguration.http.passthrough.protocolType` equals `MCP` in the deployed target configuration.
 4. WHEN a candidate Compatible_Passthrough_Target is evaluated before activation, THE Multi_Tenant_Agent_Identity_System SHALL verify that the target credential-provider entry has `credentialProviderType` equal to `JWT_PASSTHROUGH` in the deployed target configuration.
-5. WHEN a candidate Compatible_Passthrough_Target is evaluated before activation, THE Multi_Tenant_Agent_Identity_System SHALL verify that the configured endpoint and path resolve exactly to the MCP_Runtime_Invocation_URL composed from the deployed AWS Region, URL-encoded Sage_MCP_Runtime ARN, and deployed qualifier for the same Tenant_Route_C_Lane.
+5. WHEN a candidate Compatible_Passthrough_Target is evaluated before activation, THE Multi_Tenant_Agent_Identity_System SHALL verify that the configured endpoint equals the MCP_Runtime_Base_URL composed from the deployed AWS Region and URL-encoded Sage_MCP_Runtime ARN for the same Tenant_Route_C_Lane, that the endpoint carries no query string, and that the deployed qualifier is supplied as a static query parameter.
 6. IF a candidate target uses an AgentCore Runtime target type, Semantic_MCP_Target type, or any target type other than Gateway HTTP passthrough with `protocolType: MCP`, THEN THE Multi_Tenant_Agent_Identity_System SHALL reject the Proposed_Route_C_Configuration before activation.
 7. THE Multi_Tenant_Agent_Identity_System SHALL exclude an AgentCore Runtime target type as an alternative Compatible_Passthrough_Target for this specification.
 8. THE Multi_Tenant_Agent_Identity_System SHALL exclude an in-place `JWT_PASSTHROUGH` assumption or configuration change for a Semantic_MCP_Target.
@@ -481,7 +483,7 @@ The Sage proof of concept selects Route C because it matches the existing same-J
 21. WHEN caller-authority property tests generate Presented_Tenant_Values, THE Test_Suite SHALL verify that prompts, payloads, query parameters, caller-controlled headers, model output, and tool arguments cannot change lane, issuer configuration, subject, or tenant authority.
 22. WHEN Sage API boundary tests run, THE Test_Suite SHALL verify exactly two allowlisted issuers and independent token, operation, subject, tenant, row-level-security, and non-relational tenant-isolation checks before tenant-data access or change.
 23. WHEN Sage API boundary and unavailability tests run, THE Test_Suite SHALL verify Sage_MCP data access only through Sage_API, zero direct customer data-store credentials in Agent_Application and Sage_MCP, and zero direct customer data-store access after Sage_API unavailability or request failure.
-24. WHEN target-capability and target-configuration tests run, THE Test_Suite SHALL inspect each deployed target and verify that the deployed target type is Gateway HTTP passthrough, the official-documentation evidence identifies support for Gateway HTTP passthrough with `protocolType: MCP` and `JWT_PASSTHROUGH` and records the evidence retrieval date, `targetConfiguration.http.passthrough.protocolType` equals `MCP`, a credential-provider entry has `credentialProviderType` equal to `JWT_PASSTHROUGH`, and endpoint and path composition equal the MCP_Runtime_Invocation_URL for the deployed Region, URL-encoded Sage_MCP_Runtime ARN, and qualifier.
+24. WHEN target-capability and target-configuration tests run, THE Test_Suite SHALL inspect each deployed target and verify that the deployed target type is Gateway HTTP passthrough, the official-documentation evidence identifies support for Gateway HTTP passthrough with `protocolType: MCP` and `JWT_PASSTHROUGH` and records the evidence retrieval date, `targetConfiguration.http.passthrough.protocolType` equals `MCP`, a credential-provider entry has `credentialProviderType` equal to `JWT_PASSTHROUGH`, and the endpoint equals the MCP_Runtime_Base_URL for the deployed Region and URL-encoded Sage_MCP_Runtime ARN with the qualifier supplied as a static query parameter and no query string on the endpoint.
 25. WHEN target-protocol tests run, THE Test_Suite SHALL verify MCP initialization, tool listing, non-mutating tool invocation, complete ordered streamed results, and other-lane token rejection through the Gateway HTTP passthrough target before candidate activation.
 26. WHEN target-migration tests run, THE Test_Suite SHALL verify separate unchanged preservation and successful restoration of each lane's Rollback_Route_C_Topology after capability, protocol, cross-lane, or post-activation failure and unchanged active and rollback topologies in the unaffected lane.
 27. WHEN forbidden-path and forwarding-boundary tests run, THE Test_Suite SHALL verify exactly one Authorization_Header per Route C request, fail-closed rejection of missing, duplicate, malformed, or non-preservable bearer input at each Code_Owned_Forwarding_Boundary, zero replacement credentials, zero downstream M2M token requests, zero token-exchange or on-behalf-of calls, zero OAuth credential-provider uses, zero signed-context-token paths, zero Auto_Injected_Workload_Token uses, zero downstream renewal paths, and zero caller-provided tenant-header propagation.
@@ -496,3 +498,31 @@ The Sage proof of concept selects Route C because it matches the existing same-J
 36. WHEN source-control tests run, THE Test_Suite SHALL verify unconditional Sage MCP Runtime issuer, trusted-client, `token_use=access`, Required_Door_Scope, and cross-lane rejection controls and unconditional Sage_API Approved_Source_Path rejection before Protected_Behavior.
 37. WHEN correlation tests run, THE Test_Suite SHALL verify exactly one non-secret Correlation_ID per Agent_Invocation, unchanged propagation across the Selected_Lane's Route_C_Doors, and availability of the same value and lane identity to `agent-audit-observability`.
 38. WHEN Route C security-posture tests run, THE Test_Suite SHALL verify documentation of per-lane shared-token blast radius, absence of hop-specific audience separation, correlated operational actor evidence, absence of cryptographic actor-chain claims, and the audit responsibility boundary.
+
+
+### Demonstration-build amendment to Requirement 3.5
+
+Requirement 3.5 states that the Frontend sends exactly one request to the
+Lane_Endpoint stored for the Authentication_Session's Selected_Lane. This
+amendment scopes one exception for demonstration builds only.
+
+1. WHERE a build sets `VITE_DEMO_STAGE` to `true`, THE Frontend MAY send exactly
+   one deliberate Cross_Lane_Rejection_Probe to the Agent Runtime endpoint of the
+   lane that is not the Selected_Lane, for the sole purpose of demonstrating that
+   the managed authorizer of the other lane denies the current bearer.
+2. THE Cross_Lane_Rejection_Probe SHALL read only the HTTP status of the response
+   and SHALL NOT read, render, store, or log the response body, so an unexpected
+   success cannot place another tenant's content in the user interface.
+3. THE Cross_Lane_Rejection_Probe SHALL be refused at its call site when
+   `VITE_DEMO_STAGE` is absent or not `true`, in addition to not being reachable
+   from the user interface in that case.
+4. THE Cross_Lane_Rejection_Probe SHALL send only the current access token and one
+   correlation identifier, and SHALL NOT send Browser_Renewal_Material.
+5. IF a build serves real users, THEN `VITE_DEMO_STAGE` SHALL be absent or `false`
+   and THE Frontend SHALL satisfy Requirement 3.5 without exception.
+6. THE Cross_Lane_Rejection_Probe SHALL NOT be treated as evidence of any control
+   other than the other lane's managed inbound authorization decision.
+
+Implementation: `frontend/src/lib/demo/cross-lane-probe.ts`, gated by
+`frontend/src/lib/demo/config.ts` and by the demo-stage toggle in
+`frontend/src/App.tsx`.

@@ -18,6 +18,7 @@ import json
 import os
 import socket
 import sys
+import time
 import urllib.parse
 from collections.abc import Mapping
 from datetime import date
@@ -41,6 +42,7 @@ def _ipv4_getaddrinfo(*args: Any, **kwargs: Any) -> list[tuple[Any, ...]]:
 socket.getaddrinfo = _ipv4_getaddrinfo
 
 import boto3
+from botocore.exceptions import ClientError
 
 from sage_identity import (
     TENANT_A,
@@ -67,15 +69,22 @@ def _required_text(record: Mapping[str, Any], field: str) -> str:
 def compose_mcp_runtime_invocation_url(
     region: str, runtime_arn: str, qualifier: str
 ) -> str:
-    """Compose the exact deployed MCP Runtime invocation URL.
+    """Compose the deployed MCP Runtime base URL for a passthrough endpoint.
+
+    The qualifier is deliberately NOT appended as a query string. A gateway
+    passthrough target forwards to ``{endpoint}/{path}``, so any query string on
+    the endpoint would be split by the appended path (producing
+    ``?qualifier=DEFAULT/invocations``). The qualifier is supplied separately via
+    ``staticQueryParameters`` so the gateway appends it after the path instead.
 
     Args:
         region: AWS Region containing the deployed Runtime.
         runtime_arn: Deployed MCP Runtime ARN.
-        qualifier: Deployed Runtime qualifier.
+        qualifier: Deployed Runtime qualifier, validated but not embedded here.
 
     Returns:
-        The exact AgentCore Runtime invocation URL.
+        The MCP Runtime base URL, without ``/invocations`` and without a query
+        string.
 
     Raises:
         ValueError: If any component is missing or the ARN is not a Runtime in
@@ -99,10 +108,8 @@ def compose_mcp_runtime_invocation_url(
         raise ValueError("mcpRuntimeArn must be a deployed AgentCore Runtime ARN in region")
 
     encoded_arn = urllib.parse.quote(runtime_arn, safe="")
-    encoded_qualifier = urllib.parse.quote(qualifier, safe="")
     return (
-        f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/"
-        f"{encoded_arn}/invocations?qualifier={encoded_qualifier}"
+        f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}"
     )
 
 
@@ -122,12 +129,15 @@ def validate_passthrough_target(
             "passthrough": {
                 "endpoint": expected_endpoint,
                 "protocolType": "MCP",
+                "staticQueryParameters": {"qualifier": qualifier},
+                "staticQueryParameterConflictResolution": "STATIC_OVERRIDE",
             }
         }
     }
     if target.get("targetConfiguration") != expected_configuration:
         raise ValueError(
-            "target must be HTTP passthrough protocolType MCP with the exact qualified Runtime endpoint"
+            "target must be HTTP passthrough protocolType MCP with the exact "
+            "unqualified Runtime endpoint and a static qualifier parameter"
         )
     if target.get("credentialProviderConfigurations") != _TARGET_CREDENTIALS:
         raise ValueError("target credential provider must be exactly JWT_PASSTHROUGH")
@@ -172,6 +182,8 @@ def render_gateway_targets(
                     "passthrough": {
                         "endpoint": endpoint,
                         "protocolType": "MCP",
+                        "staticQueryParameters": {"qualifier": qualifier},
+                        "staticQueryParameterConflictResolution": "STATIC_OVERRIDE",
                     }
                 }
             },
@@ -190,19 +202,165 @@ def render_gateway_targets(
     return targets
 
 
+GATEWAY_ROLE_NAME = "sage-gateway-role"
+GATEWAY_INVOKE_POLICY_NAME = "SageGatewayInvokeMcpRuntimes"
+
+
+def gateway_trust_policy(account_id: str, region: str) -> dict[str, Any]:
+    """Build the documented Gateway trust policy with confused-deputy guards.
+
+    AWS documents ``aws:SourceAccount`` and ``aws:SourceArn`` conditions for the
+    AgentCore Gateway execution role. Without them any AgentCore gateway in any
+    account could ask the service to assume this role.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id},
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/*"
+                        )
+                    },
+                },
+            }
+        ],
+    }
+
+
+def gateway_invoke_policy(account_id: str, region: str) -> dict[str, Any]:
+    """Build the least-privilege outbound policy for Sage MCP Runtime targets.
+
+    A ``JWT_PASSTHROUGH`` target forwards the caller's bearer, so the Gateway
+    should not need SigV4 authority over the Runtime. This grant is retained as
+    a narrow fallback while that is confirmed behaviourally, and is scoped to the
+    two Sage MCP Runtimes rather than every runtime in the account.
+    """
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "InvokeSageMcpRuntimes",
+                "Effect": "Allow",
+                "Action": ["bedrock-agentcore:InvokeAgentRuntime"],
+                "Resource": [
+                    f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/sage_mcp_*"
+                ],
+            }
+        ],
+    }
+
+
+def ensure_gateway_role(iam: Any, account_id: str, region: str) -> str:
+    """Create or reconcile the Gateway execution role and return its ARN."""
+    trust = json.dumps(gateway_trust_policy(account_id, region))
+    try:
+        role = iam.get_role(RoleName=GATEWAY_ROLE_NAME)["Role"]
+        # Reconcile an existing role that may predate the trust conditions.
+        iam.update_assume_role_policy(
+            RoleName=GATEWAY_ROLE_NAME, PolicyDocument=trust
+        )
+    except ClientError as error:
+        if error.response["Error"]["Code"] != "NoSuchEntity":
+            raise
+        role = iam.create_role(
+            RoleName=GATEWAY_ROLE_NAME,
+            AssumeRolePolicyDocument=trust,
+            Description="Sage AgentCore Gateway execution role",
+        )["Role"]
+
+    iam.put_role_policy(
+        RoleName=GATEWAY_ROLE_NAME,
+        PolicyName=GATEWAY_INVOKE_POLICY_NAME,
+        PolicyDocument=json.dumps(gateway_invoke_policy(account_id, region)),
+    )
+    return str(role["Arn"])
+
+
+def ensure_gateways(
+    configuration: Mapping[str, Any],
+    agentcore: Any,
+    iam: Any,
+    account_id: str,
+) -> dict[str, str]:
+    """Create any missing lane Gateway with its own same-lane JWT authorizer.
+
+    ``deploy_gateway_targets`` configures Gateways that already exist, so this
+    closes the gap that previously required manual creation.
+    """
+    region = _required_text(configuration, "region")
+    role_arn = ensure_gateway_role(iam, account_id, region)
+    authorizers = {
+        item["laneId"]: item["authorizerConfig"]
+        for item in render_deployments(dict(configuration), "gateway")
+    }
+
+    existing = {
+        gateway.get("name"): gateway.get("gatewayId")
+        for gateway in agentcore.list_gateways(maxResults=100).get("items", [])
+    }
+    created: dict[str, str] = {}
+    for lane_id in sorted(_REQUIRED_LANES):
+        name = f"sage-gw-{lane_id.replace('_', '-').lower()}"
+        if name in existing:
+            created[lane_id] = str(existing[name])
+            continue
+        # protocolType is deliberately omitted. Setting it to MCP — the only
+        # accepted value — makes the service reject HTTP target configurations
+        # with "HTTP target configuration is not supported for gateways with MCP
+        # protocol type". A gateway created without it accepts the HTTP
+        # passthrough target this architecture requires.
+        response = agentcore.create_gateway(
+            name=name,
+            roleArn=role_arn,
+            authorizerType="CUSTOM_JWT",
+            authorizerConfiguration=authorizers[lane_id],
+        )
+        created[lane_id] = str(response["gatewayId"])
+    return created
+
+
+def _wait_for_gateway_ready(
+    client: Any, gateway_id: str, *, attempts: int = 40, delay: float = 5.0
+) -> None:
+    """Block until a Gateway leaves a transitional status.
+
+    UpdateGateway puts the Gateway into UPDATING, and CreateGatewayTarget is
+    rejected while that lasts.
+    """
+    for _ in range(attempts):
+        status = client.get_gateway(gatewayIdentifier=gateway_id).get("status")
+        if status == "READY":
+            return
+        if status in {"FAILED", "UPDATE_UNSUCCESSFUL", "DELETING"}:
+            raise ValueError(f"gateway {gateway_id} is in status {status}")
+        time.sleep(delay)
+    raise ValueError(f"gateway {gateway_id} did not become READY in time")
+
+
 def apply_gateway_authorizer(
     client: Any, gateway_id: str, authorizer: Mapping[str, Any]
 ) -> None:
     """Replace one existing Gateway's inbound policy and verify the readback."""
     current = client.get_gateway(gatewayIdentifier=gateway_id)
-    client.update_gateway(
-        gatewayIdentifier=gateway_id,
-        name=_required_text(current, "name"),
-        roleArn=_required_text(current, "roleArn"),
-        protocolType=_required_text(current, "protocolType"),
-        authorizerType="CUSTOM_JWT",
-        authorizerConfiguration=dict(authorizer),
-    )
+    parameters: dict[str, Any] = {
+        "gatewayIdentifier": gateway_id,
+        "name": _required_text(current, "name"),
+        "roleArn": _required_text(current, "roleArn"),
+        "authorizerType": "CUSTOM_JWT",
+        "authorizerConfiguration": dict(authorizer),
+    }
+    # Gateways that accept HTTP passthrough targets carry no protocolType, and
+    # UpdateGateway rejects an empty value, so it is only sent when present.
+    protocol_type = current.get("protocolType")
+    if isinstance(protocol_type, str) and protocol_type.strip():
+        parameters["protocolType"] = protocol_type
+    client.update_gateway(**parameters)
     updated = client.get_gateway(gatewayIdentifier=gateway_id)
     if (
         updated.get("authorizerType") != "CUSTOM_JWT"
@@ -238,6 +396,7 @@ def deploy_gateway_targets(
             request["gatewayIdentifier"],
             gateway_authorizers[lane_id]["authorizerConfig"],
         )
+        _wait_for_gateway_ready(agentcore, request["gatewayIdentifier"])
         response = agentcore.create_gateway_target(**request)
         target_id = response["targetId"]
         deployed = agentcore.get_gateway_target(
@@ -299,11 +458,28 @@ def main() -> None:
         ),
     )
     parser.add_argument("--render", action="store_true")
+    parser.add_argument(
+        "--ensure-gateways",
+        action="store_true",
+        help="Create the Gateway role and any missing lane Gateway, then exit.",
+    )
     args = parser.parse_args()
 
     configuration = json.loads(args.config.read_text(encoding="utf-8"))
     if args.render:
         print(json.dumps(render_gateway_targets(configuration), sort_keys=True))
+        return
+
+    if args.ensure_gateways:
+        region = _required_text(configuration, "region")
+        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        gateways = ensure_gateways(
+            configuration,
+            boto3.client("bedrock-agentcore-control", region_name=region),
+            boto3.client("iam"),
+            account_id,
+        )
+        print(json.dumps(gateways, indent=2, sort_keys=True))
         return
 
     outputs = deploy_gateway_targets(configuration)

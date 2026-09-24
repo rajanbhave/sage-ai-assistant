@@ -87,7 +87,7 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
             },
             {
                 "claim_reference": "CLM-12345",
-                "policy_id": "AXA-MOT-001-POL-6666",
+                "policy_id": "ALZ-MOT-001-POL-6666",
                 "status": "approved",
                 "amount": 9_700.00,
                 "currency": "EUR",

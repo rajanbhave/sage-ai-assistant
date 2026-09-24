@@ -23,6 +23,24 @@ export interface TrustedLaneRecord {
   readonly expectedTenantClaim: LaneId;
 }
 
+/**
+ * Non-secret claim subset retained for identity display and demo evidence.
+ *
+ * These are the values every managed door validates. The bearer itself is
+ * never included, and `tokenId` is the token's `jti` identifier, which cannot
+ * authenticate a request on its own.
+ */
+export interface SafeTokenClaims {
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly tokenUse: string;
+  readonly subject: string;
+  readonly tenantId: LaneId;
+  readonly scopes: readonly string[];
+  readonly expiresAt: number;
+  readonly tokenId: string;
+}
+
 export interface AuthSession {
   readonly lane: TrustedLaneRecord;
   readonly accessToken: AuthenticationArtifact;
@@ -31,6 +49,7 @@ export interface AuthSession {
   readonly expiresAt: number;
   readonly sessionId: string;
   readonly username: string;
+  readonly claims: SafeTokenClaims;
 }
 
 const CANONICAL_TENANT_CLAIM = "custom:tenant_id";
@@ -127,6 +146,29 @@ function userPoolFor(lane: TrustedLaneRecord): CognitoUserPool {
   });
 }
 
+/** Retain only the non-secret claims the managed doors validate. */
+function safeClaims(
+  payload: Record<string, unknown>,
+  lane: TrustedLaneRecord,
+  subject: string,
+  expiresAt: number
+): SafeTokenClaims {
+  const scope = payload.scope;
+  const tokenId = payload.jti;
+  return Object.freeze({
+    issuer: lane.issuer,
+    clientId: lane.appClientId,
+    tokenUse: "access",
+    subject,
+    tenantId: lane.expectedTenantClaim,
+    scopes: Object.freeze(
+      typeof scope === "string" ? scope.split(" ").filter(Boolean) : []
+    ),
+    expiresAt,
+    tokenId: typeof tokenId === "string" ? tokenId : "",
+  });
+}
+
 /** Establish a lane-bound browser session from a Cognito access token. */
 export function establishSession(
   lane: TrustedLaneRecord,
@@ -182,6 +224,7 @@ export function establishSession(
     expiresAt,
     sessionId: crypto.randomUUID(),
     username,
+    claims: safeClaims(payload, lane, subject, expiresAt),
   });
 }
 

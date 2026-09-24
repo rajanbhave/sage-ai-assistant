@@ -7,6 +7,7 @@ import type { AuthSession } from "@/lib/auth/cognito";
 const session: AuthSession = {
   lane: { laneId: "Tenant_A", tenantId: "Tenant_A", userPoolId: "pool", appClientId: "client", issuer: "issuer", agentRuntimeEndpoint: "https://agent", expectedTenantClaim: "Tenant_A" },
   accessToken: new AuthenticationArtifact("token"), subject: "subject", tenantId: "Tenant_A", expiresAt: 4_000_000_000, sessionId: "session", username: "user",
+  claims: { issuer: "issuer", clientId: "client", tokenUse: "access", subject: "subject", tenantId: "Tenant_A", scopes: ["sage-agent/invoke"], expiresAt: 4_000_000_000, tokenId: "jti" },
 };
 const binding: InvocationBinding = { sessionId: "session", laneId: "Tenant_A", subject: "subject", tenantId: "Tenant_A", correlationId: "c" };
 const initial: Message[] = [{ id: "assistant", role: "assistant", segments: [], isStreaming: true }];
