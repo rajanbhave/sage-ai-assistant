@@ -116,7 +116,7 @@ bash scripts/deploy_agent.sh
 
 Every script renders a mutation-free plan with `--render` first. Mutating
 commands require explicit intent: `--confirm` for Cognito changes and
-`--allow-public-url` for the Sage API Function URL.
+`--allow-public-url` for the Sage API's internet-reachable endpoint.
 
 Runtime, Gateway, and pool names in the manifest must differ from any existing
 deployment, because `deploy_mcp.sh` and `deploy_agent.sh` pass `runtimeName`
@@ -124,14 +124,21 @@ straight to `agentcore` and would otherwise update an existing runtime in place.
 
 ### Shared Sage API hosting
 
-The Sage API is deployed as a Lambda with a Function URL. The MCP Runtime calls
-it with the original user access token rather than SigV4, so the Function URL
-auth type must be `NONE` and the endpoint is internet reachable. Authorization
-rests entirely on the API's own independent validation, and because a public
-endpoint has no trusted private ingress, the request-source control is
-deployment-asserted and is recorded as `unavailable` rather than claimed.
-Reserved concurrency bounds abuse and cost; place a throttle or WAF in front
-before any non-demo use.
+The Sage API is deployed as a Lambda behind an API Gateway HTTP API. The MCP
+Runtime calls it with the original user access token rather than SigV4, so the
+HTTP API carries no gateway-level authorizer and the endpoint is internet
+reachable. Authorization rests entirely on the API's own independent validation,
+and because a public endpoint has no trusted private ingress, the request-source
+control is deployment-asserted and is recorded as `unavailable` rather than
+claimed. Reserved concurrency bounds abuse and cost; place a throttle or WAF in
+front before any non-demo use.
+
+A Lambda Function URL was the approved hosting option and was built first, but
+every request to it returned `403 AccessDeniedException` without invoking the
+function, so the deployment pivoted to API Gateway. See
+`.kiro/poc-deviations.md` for that record. `deploy_sage_api.py` deletes a
+Function URL left behind by an earlier run rather than leaving it as a dead
+public artifact.
 
 Verification keys are read from each pool's published JWKS at deploy time and
 frozen into the function configuration. A Cognito signing-key rotation therefore

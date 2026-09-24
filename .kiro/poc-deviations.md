@@ -102,14 +102,15 @@ tokens because the `V2_0` customizer injects them, which is why nothing appears
 broken. Running it requires `<LANE>_AGENT_RUNTIME_ENDPOINT`, so it must follow the
 Agent Runtime deployment.
 
-### 10. Requirement 3.5 amendment is unwritten
+### 10. Requirement 3.5 amendment — resolved
 
 `frontend/src/lib/demo/cross-lane-probe.ts` deliberately sends the session bearer
-to the other lane's Agent Runtime to demonstrate a managed denial. Requirement 3.5
-states the frontend sends requests only to the selected lane's endpoint. The probe
-is gated behind `VITE_DEMO_STAGE` at both the call site and the render site, but
-the scoped requirements amendment permitting it in demonstration builds has not
-been written.
+to the other lane's Agent Runtime to demonstrate a managed denial, which
+Requirement 3.5 would otherwise forbid. The scoped amendment permitting it in
+demonstration builds is now written: see `requirements.md`, which records the
+probe, its implementation, and its gating behind `VITE_DEMO_STAGE` at both the
+call site and the render site. Retained here as a numbered entry so earlier
+references to item 10 still resolve.
 
 ### 11. Unrelated resources still live
 
