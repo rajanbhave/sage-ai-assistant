@@ -97,6 +97,9 @@ keys/
 # Generated deployment and local spec evidence
 scripts/registry_output.json
 scripts/identity_deployment.json
+scripts/deployment_authorization.json
+scripts/legacy_oauth_provider_removal.json
+scripts/route_c_validation_report.json
 .kiro/review-*.md
 .kiro/specs/multi-tenant-agent-identity/.config.kiro
 .kiro/specs/multi-tenant-agent-identity/task-*.json
