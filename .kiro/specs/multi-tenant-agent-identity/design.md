@@ -694,6 +694,90 @@ Route C carries one token through all doors in its issuing lane. Compromise can 
 
 Compensating controls are lane-specific issuer/client validation, cross-lane rejection, one local scope per door, operation scope at the API, customer-approved/documented lifetimes, browser-only renewal, unconditional Sage API Approved Source Paths, conditional MCP same-lane source restriction only when the Source Signal Proof Gate proves it for the exact topology, no direct Agent/MCP datastore credentials, provenance-safe sinks, no automatic write replay, independent shared-API validation and RLS, and unchanged non-secret correlation. `allowedWorkloadConfiguration` remains candidate-only; an unproven MCP source signal is recorded unavailable and is not claimed. MCP JWT/client/type/scope/cross-lane controls remain unconditional. No numeric lifetime is invented by this design.
 
+## As-Deployed POC Deviations
+
+This section records where the deployed two-tenant proof of concept differs from
+the design above. Each entry is an accepted POC shortcut or an open item and names
+what production requires, so a reader cannot mistake a shortcut for the design.
+Deployment-status entries for individual tasks are in `tasks.md`.
+
+### The shared Sage API is a public endpoint with no authorizer
+
+The design places the Sage API behind a trusted private ingress that injects
+`sage.source_path`. It is deployed instead as a Lambda behind an API Gateway HTTP
+API with no authorizer, and `sage_api/lambda_handler.py` injects a constant from
+`SAGE_API_SOURCE_PATH`. The Approved Source Paths control therefore always passes
+and is recorded as `unavailable` rather than claimed, which qualifies the
+"unconditional Sage API Approved Source Paths" compensating control above.
+
+What still holds, verified against live tokens: independent RS256 verification
+against each pool's published keys, issuer, expiry, trusted client, `token_use`,
+the `sage-api/read` scope, the exact tenant claim, and tenant data isolation.
+
+Production requires a private integration or VPC Link, or a JWT authorizer at the
+API Gateway so invalid tokens are rejected before Lambda, plus a real
+`sage.source_path` derived from that ingress.
+
+### Hosting changed from the approved option
+
+A Lambda Function URL was approved and built first. Every request returned
+`403 AccessDeniedException` and the function was never invoked, despite
+`AuthType: NONE` and a correct resource policy — an organization guardrail denies
+anonymous `lambda:InvokeFunctionUrl` in this account. Service control policies are
+not readable from a member account, so this is inferred from that signature.
+
+The pivot to API Gateway was made without a further approval because the approved
+option was impossible. The blocked Function URL was deleted rather than left as a
+dead public artifact, and `deploy_sage_api.py` deletes one left by an earlier run.
+
+### No same-lane Gateway source restriction
+
+The manifest records `sourceSignalAvailable: false` for both lanes, with evidence
+text stating that no reviewed AWS documentation establishes a verifiable Gateway
+source signal for an HTTP passthrough target with `protocolType: MCP` and
+`JWT_PASSTHROUGH`. The Source Signal Proof Gate therefore does not open.
+
+Consequence: an MCP Runtime accepts a valid same-lane token from any caller, not
+only from its own Gateway. Cross-lane isolation is unaffected — a wrong-lane token
+is rejected by the managed authorizer before application code runs.
+
+### The Sage API serves `$LATEST`
+
+The HTTP API integration targets the unqualified function so the resource policy
+survives each code publish. The pre-token customizers are version-pinned and
+alias-bound; the Sage API is not. Production should pin an alias and move it on
+deploy.
+
+### The access-token lifetime approval is self-issued
+
+`deploy_user_pool.py` requires `<LANE>_APPROVED_ACCESS_TOKEN_VALIDITY`, its unit,
+and a `TOKEN_LIFETIME_APPROVAL_REFERENCE`, deliberately with no defaults, because
+the value must match a customer approval. 60 minutes and the reference
+`POC-2026-04-14-sage-route-c` were chosen during deployment, not approved by the
+customer. This must be replaced before any non-POC use, and it is why the
+customer-approved-lifetime compensating control above is not yet satisfied.
+
+### Other accepted risks
+
+- Reserved concurrency of 5 on a public endpoint is an unauthenticated
+  denial-of-service vector against both tenants' data path.
+- `SAGE_API_PUBLIC_KEYS` is a JWKS snapshot taken at deploy time. A Cognito
+  signing-key rotation produces a hard 403 until `deploy_sage_api.py` is re-run.
+- `ALLOW_USER_PASSWORD_AUTH` remains enabled on both public clients although the
+  frontend authenticates with SRP. Removing it also requires changing
+  `PUBLIC_AUTH_FLOWS` in `deploy_user_pool.py`.
+- Demo user passwords were generated during deployment rather than supplied by an
+  operator, and live in a gitignored local file with mode 600.
+
+### What `INACTIVE` means here
+
+`candidateState: INACTIVE` in the manifest and `frontend.deploymentAllowed: false`
+remain accurate even though both pools and Gateways are live resources. Inactive
+means not serving user traffic, as in Task 13.8's "keep both MCP Runtimes inactive
+from user traffic" — not "not created". The manifest accuracy problem to watch is
+provisional placeholder values, which `scripts/patch_identity_manifest.py`
+resolves from live readbacks.
+
 ## Testing Strategy
 
 The suite uses property tests for pure configuration, claim parsing, state reducers, header builders, issuer selection, and serializers; focused examples for UI/error behavior; and integration tests for Cognito, AgentCore, MCP, source controls, and API data isolation. External AWS behavior is tested with representative cases rather than randomized high-cost calls.

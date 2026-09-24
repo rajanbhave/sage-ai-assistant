@@ -135,10 +135,10 @@ front before any non-demo use.
 
 A Lambda Function URL was the approved hosting option and was built first, but
 every request to it returned `403 AccessDeniedException` without invoking the
-function, so the deployment pivoted to API Gateway. See
-`.kiro/poc-deviations.md` for that record. `deploy_sage_api.py` deletes a
-Function URL left behind by an earlier run rather than leaving it as a dead
-public artifact.
+function, so the deployment pivoted to API Gateway. See the "As-Deployed POC
+Deviations" section of `.kiro/specs/multi-tenant-agent-identity/design.md` for
+that record. `deploy_sage_api.py` deletes a Function URL left behind by an
+earlier run rather than leaving it as a dead public artifact.
 
 Verification keys are read from each pool's published JWKS at deploy time and
 frozen into the function configuration. A Cognito signing-key rotation therefore
