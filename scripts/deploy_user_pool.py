@@ -327,10 +327,18 @@ def verify_lane_preflight(
         feature_plan == "LITE" and version == "V2_0"
     )
     if not feature_plan_supports_v2:
-        raise ValueError(f"{lane.lane_id} feature plan does not support V2_0")
+        raise ValueError(
+            f"{lane.lane_id} is on the {feature_plan!r} feature plan, which cannot "
+            "deliver V2_0 pre-token events, so the tenant claim would reach only "
+            "the ID token and not the access token this lane forwards as its "
+            "bearer. Upgrade with: aws cognito-idp update-user-pool "
+            f"--user-pool-id {lane.user_pool_id} --user-pool-tier ESSENTIALS"
+        )
     if version != "V2_0" or lambda_arn != lane.pre_token_lambda_arn:
         raise ValueError(
-            f"{lane.lane_id} active PreTokenGeneration configuration is not V2_0"
+            f"{lane.lane_id} active PreTokenGeneration configuration is not V2_0 "
+            "bound to this lane's customizer alias; a V1_0 trigger cannot add "
+            "claims to an access token"
         )
 
     assignment_sources = [

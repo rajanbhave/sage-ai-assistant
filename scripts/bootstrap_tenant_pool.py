@@ -133,7 +133,11 @@ def _verify_adopted_pool(cognito: Any, pool_id: str, name: str) -> None:
     tier = pool.get("UserPoolTier")
     if tier != FEATURE_PLAN:
         raise ValueError(
-            f"{name} is on feature plan {tier!r}; {FEATURE_PLAN} is required for V2_0"
+            f"{name} is on the {tier!r} feature plan, which cannot deliver V2_0 "
+            "pre-token events, so only the ID token would carry the tenant claim "
+            f"and the access token would not. Upgrade with: aws cognito-idp "
+            f"update-user-pool --user-pool-id {pool_id} --user-pool-tier "
+            f"{FEATURE_PLAN}"
         )
     assignment = [
         attribute

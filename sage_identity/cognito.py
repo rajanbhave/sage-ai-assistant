@@ -140,7 +140,8 @@ def customize_access_token(
         configuration: Trusted deployment configuration for the issuing lane.
 
     Returns:
-        A copy of ``event`` containing access-token claim and scope overrides.
+        A copy of ``event`` with access-token claim and scope overrides, plus the
+        same canonical tenant claim on the ID token for clients that read it.
 
     Raises:
         IdentityError: If the event is not bound to one valid lane assignment,
@@ -183,16 +184,22 @@ def customize_access_token(
     authorized_scopes = grants[0].scopes
 
     incoming_scopes = _scope_set(request.get("scopes"))
+    tenant_claim = {configuration.canonical_tenant_claim_name: tenant}
     result: dict[str, Any] = deepcopy(dict(event))
     result["response"] = {
         "claimsAndScopeOverrideDetails": {
             "accessTokenGeneration": {
-                "claimsToAddOrOverride": {
-                    configuration.canonical_tenant_claim_name: tenant,
-                },
+                "claimsToAddOrOverride": dict(tenant_claim),
                 "scopesToAdd": sorted(authorized_scopes - incoming_scopes),
                 "scopesToSuppress": sorted(incoming_scopes - authorized_scopes),
-            }
+            },
+            # The access token is the only Route C bearer, but clients that still
+            # read the ID token must see the same tenant value rather than none.
+            # Scopes are deliberately not overridden here: scope authority belongs
+            # to the access token alone.
+            "idTokenGeneration": {
+                "claimsToAddOrOverride": dict(tenant_claim),
+            },
         }
     }
     return result

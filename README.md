@@ -247,3 +247,63 @@ bash -n scripts/deploy_agent.sh scripts/deploy_gateway.sh scripts/deploy_mcp.sh
 cd frontend && npm test && npm run build
 git diff --check
 ```
+
+
+## Cognito access-token tenant claim: reference for Emil
+
+The failure this addresses: a pre-token Lambda that customizes only the **ID
+token**, so an MCP client forwarding the **access token** sees no tenant claim and
+the backend has nothing to authorize on. Five requirements, all enforced in this
+repository.
+
+**1. The pool must be on Essentials or Plus.** Only those feature plans deliver
+`V2_0` pre-token events, and `V2_0` is the only version that can add claims to an
+access token. A Lite pool silently customizes the ID token alone. Upgrade with:
+
+```bash
+aws cognito-idp update-user-pool --user-pool-id <pool-id> --user-pool-tier ESSENTIALS
+```
+
+There is a legacy exception: pools that had Advanced Security enabled before
+2024-11-22 may keep `V2_0` on Lite. `scripts/deploy_user_pool.py` accepts exactly
+that case — Lite passes the gate only when `V2_0` is already the active version —
+and otherwise refuses with the cause and the upgrade command.
+
+**2. The trigger must be `PreTokenGenerationConfig` with `LambdaVersion: V2_0`.**
+Setting only the legacy `LambdaConfig.PreTokenGeneration` field pins V1_0, which
+cannot touch the access token. `attach-trigger` in
+`scripts/bootstrap_tenant_pool.py` writes `PreTokenGenerationConfig` with the
+qualified alias ARN, mirrors the legacy field when the pool already has one so the
+two cannot disagree, resends every preserved pool setting because
+`UpdateUserPool` resets omitted values, and then reads the trigger back and fails
+if the result is not `V2_0` bound to that alias.
+
+**3. Emit the claim into both generations.** `sage_identity.cognito` returns the
+canonical tenant claim under `accessTokenGeneration.claimsToAddOrOverride` **and**
+`idTokenGeneration.claimsToAddOrOverride`. The access token is the only bearer,
+but web clients that still read the ID token keep working instead of regressing to
+an absent claim. Scope overrides stay on the access token alone.
+
+The claim name is configuration, not a constant: `canonicalTenantClaimName` is
+`custom:tenant_id` here and can be `custom:tenant_slug` elsewhere with no code
+change. Cognito-owned names (`iss`, `exp`, `sub`, `client_id`, `token_use`) are
+refused at configuration load.
+
+**4. The backend must read the access token and require `token_use=access`.**
+`sage_api/identity.py` validates the signature against the pool's published keys,
+then issuer, expiry, trusted client, `token_use == "access"`, the operation scope,
+and the exact tenant claim, before any claim becomes authority.
+
+**5. Never accept an ID token as the bearer.** An ID token is an authentication
+receipt for the client, not an authorization credential for an API: it carries
+`token_use: "id"`, its audience is the app client, and it has no scopes. The
+`token_use` check in step 4 is what rejects it — without that check, adding the
+tenant claim to the ID token in step 3 would turn a convenience into a
+vulnerability.
+
+In this repository the MCP application layer deliberately does **not** repeat the
+`token_use` check. The MCP Runtime's managed JWT authorizer enforces token type
+before application code runs, and the design's door table assigns signature,
+expiry, issuer, client, token type, and managed scope to that authorizer alone. A
+deployment without a managed authorizer in front of its MCP server must perform
+the step 4 validation itself.
