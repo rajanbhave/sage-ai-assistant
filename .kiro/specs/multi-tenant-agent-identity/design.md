@@ -399,6 +399,8 @@ Each lane gets a separate target bound to its separate Gateway and MCP Runtime. 
 
 Before activation, deployed configuration inspection requires the endpoint and path to equal the lane's `MCP_Runtime_Invocation_URL`, composed only from the deployed AWS Region, URL-encoded Sage MCP Runtime ARN, and deployed qualifier. AgentCore Runtime targets, semantic MCP targets, and any in-place `JWT_PASSTHROUGH` assumption for a semantic target are incompatible and rejected.
 
+Every `protocolType: MCP` in this section is `targetConfiguration.http.passthrough.protocolType`, a property of the target. It is not the gateway-level `protocolType`, which both deployed Gateways leave unset. The two are separate fields and must not be conflated: setting the gateway-level protocol type to `MCP` makes AWS refuse every `http.*` target on that Gateway, which would foreclose the AgentCore Runtime target recorded as the candidate source-signal fix in the deviations section. Leave the gateway-level value unset.
+
 The Agent MCP client uses that lane's target-specific Gateway URL and performs direct MCP `initialize`, `tools/list`, and `tools/call`. The target has no OAuth credential provider. Gateway validates against its lane's discovery URL and uses configured `JWT_PASSTHROUGH`; exact bearer-byte equality is not asserted across the managed Gateway-to-MCP-Runtime boundary.
 
 ### 8. Sage MCP lane identity and API client
@@ -474,7 +476,7 @@ Credential-bearing boundary fields are typed. Values originating in Authorizatio
 
 One opaque, non-secret correlation ID is established per invocation and propagated unchanged through the selected lane and shared API. Each door exposes correlation ID, door identity, lane identity, verified subject, signed tenant, and outcome to `agent-audit-observability` without exposing the token.
 
-For each MCP Runtime, the Source Signal Proof Gate records documentation evidence, deployed configuration evidence, and behavioral verification for the exact HTTP MCP passthrough plus `JWT_PASSTHROUGH` topology. `allowedWorkloadConfiguration` is candidate-only, and AWS documents it as supported only for AgentCore Runtime targets with AgentCore Gateways as the allowed workloads, so it does not apply to an `http.passthrough` target at all; a Runtime-type target is the documented path to a Gateway source signal and is recorded as documented-not-observed in the deviations section. If a Verifiable Gateway Source Signal is proven, the MCP Runtime restricts requests to its same-lane Gateway and rejects missing or wrong signals; if not, the control is recorded as unavailable and the design makes no same-lane Gateway source-restriction claim. Regardless of that result, each MCP Runtime unconditionally enforces lane issuer, trusted client, `token_use=access`, local scope, and cross-lane rejection. Sage API unconditionally accepts network requests only from the two documented Sage MCP Approved Source Paths and customer-application Approved Source Paths. Correlation is operational evidence, not a cryptographic actor chain, and does not distinguish agent-mediated from direct action; see the deviations section.
+For each MCP Runtime, the Source Signal Proof Gate records documentation evidence, deployed configuration evidence, and behavioral verification for the exact HTTP MCP passthrough plus `JWT_PASSTHROUGH` topology. `allowedWorkloadConfiguration` is candidate-only, and live probing has now closed it for this topology: AgentCore accepts the parameter and it does block direct Runtime invocation, but it is satisfied by a transaction token identifying the calling workload, which a `JWT_PASSTHROUGH` Gateway does not produce, so it rejects Gateway-routed traffic too. The gate therefore cannot open while one unmodified user bearer is the only credential; see the deviations section. If a Verifiable Gateway Source Signal is ever proven, the MCP Runtime restricts requests to its same-lane Gateway and rejects missing or wrong signals; until then the control is recorded as unavailable and the design makes no same-lane Gateway source-restriction claim. Regardless of that result, each MCP Runtime unconditionally enforces lane issuer, trusted client, `token_use=access`, local scope, and cross-lane rejection. Sage API unconditionally accepts network requests only from the two documented Sage MCP Approved Source Paths and customer-application Approved Source Paths. Correlation is operational evidence, not a cryptographic actor chain, and does not distinguish agent-mediated from direct action; see the deviations section.
 
 ## Data Models
 
@@ -759,15 +761,54 @@ So the two features are documented as compatible: a Runtime-type target can carr
 what would close this deviation. Route C deploys an `http.passthrough` target,
 which supports `JWT_PASSTHROUGH` but not the workload restriction.
 
-Status: **documented, not observed.** A probe during deployment had an
-`http.agentcoreRuntime` target rejected on a gateway with `protocolType: MCP`, so
-the documented combination has not been reproduced in this account. Proving it
-requires creating a throwaway gateway, which is a mutation and is out of scope for
-a read-only review. The candidate configuration is rendered, never applied, by
-`scripts/deploy_gateway.py --render-runtime-target-candidate`, and
-`render_lane_authorizers(lane, mcp_allowed_gateway_arn=…)` renders the matching
-MCP Runtime authorizer addition. The deviation stays open until a live probe
-succeeds.
+Status: **proven unreachable with JWT passthrough.** Two live probes settled this.
+
+The first created an `http.agentcoreRuntime` target carrying `JWT_PASSTHROUGH`
+against the real MCP-protocol Runtime on a throwaway gateway; it reached `READY`
+with no error, so the target type and passthrough are compatible in this account
+and not only on paper.
+
+An earlier attempt had that same target type refused with `ValidationException:
+HTTP target configuration is not supported for gateways with MCP protocol type`.
+That gateway had been created with an explicit gateway-level `protocolType: MCP`.
+The deployed Sage gateways do not: `GetGateway` returns neither `protocolType` nor
+`protocolConfiguration` for either. The `protocolType: MCP` recorded in the manifest
+under `gatewayTarget` is the **target's** protocol, carried inside the passthrough
+configuration, and is a different field from the gateway-level protocol type.
+Conflating the two is what made this look impossible.
+
+The second probe cloned the MCP Runtime into a throwaway runtime — the deployed one
+is in service — applied `allowedWorkloadConfiguration.hostingEnvironments` naming a
+throwaway Gateway, and put a Runtime target on that Gateway. Results with one valid
+same-lane token:
+
+| Call | Status |
+|---|---|
+| Throwaway Runtime, direct | 401 `Transaction token required: authorizer has AllowedWorkloadConfiguration configured` |
+| Throwaway Runtime, through its own named Gateway | 401, same error |
+| Deployed unrestricted Runtime, direct (control) | 200, valid JSON-RPC result |
+
+AgentCore accepts and persists the parameter, and it genuinely blocks direct
+invocation. It also blocks the Gateway-routed call, because the restriction is
+satisfied by a **transaction token** that identifies the calling workload in the
+request's identity chain, and a `JWT_PASSTHROUGH` Gateway forwards the user's bearer
+unchanged without producing one. The control call rules out anything incidental
+about the clone.
+
+So the mechanism and Route C's central premise are mutually exclusive. Configuring
+it would close direct access by also breaking every legitimate Gateway request. The
+deviation is therefore not an oversight to be fixed by configuration: within a pure
+passthrough design there is nothing to turn on.
+
+This converges with the audit-attribution gap above. Both a verifiable Gateway
+source signal and a per-action actor distinction need AgentCore's transaction-token
+identity chain, which is exactly what forwarding one unmodified user bearer gives
+up. Adopting either means adopting that chain and its extra component, not toggling
+a field.
+
+`scripts/deploy_gateway.py --render-runtime-target-candidate` and
+`render_lane_authorizers(lane, mcp_allowed_gateway_arn=…)` are retained as the
+rendered shape of what was tested, and must stay unapplied.
 
 ### No actor chain, so audit cannot distinguish agent-mediated from direct action
 
