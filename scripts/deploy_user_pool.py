@@ -23,6 +23,7 @@ match the customer-approved input exactly.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import socket
@@ -31,6 +32,13 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+# Siblings do this too. Without it the documented
+# `uv run python scripts/deploy_user_pool.py` fails to import sage_identity,
+# which is one reason this script has never run.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Force IPv4 — macOS often resolves AWS endpoints to IPv6 but the route hangs.
 _orig_getaddrinfo = socket.getaddrinfo
@@ -133,6 +141,51 @@ class TokenLifetimeEvidence:
     documentedValue: int
     documentedUnit: str
     approvalReference: str
+
+
+def load_resource_server_pool_ids(
+    environment: Mapping[str, str] = os.environ,
+) -> tuple[tuple[str, str], ...]:
+    """Load only the two pool IDs needed to reconcile Sage resource servers.
+
+    Resource-server creation depends on nothing but a pool ID. Keeping it
+    loadable without ``<prefix>_AGENT_RUNTIME_ENDPOINT`` means the four Sage
+    scopes can exist in Cognito before any Agent Runtime is deployed, so they
+    are not solely a product of the pre-token customizer injecting them.
+    """
+    pools = tuple(
+        (lane_id, _required(environment, f"{lane_id.upper()}_USER_POOL_ID"))
+        for lane_id in LANE_IDS
+    )
+    if len({pool_id for _, pool_id in pools}) != len(pools):
+        raise ValueError("each lane must name a distinct user pool")
+    return pools
+
+
+def render_resource_servers(
+    pools: tuple[tuple[str, str], ...],
+) -> dict[str, object]:
+    """Describe the resource servers that --confirm would reconcile. No AWS calls."""
+    return {
+        "awsMutationCallsIssued": 0,
+        "action": "create or update Sage resource servers",
+        "pools": [
+            {
+                "laneId": lane_id,
+                "userPoolId": pool_id,
+                "resourceServers": [
+                    {
+                        "identifier": identifier,
+                        "name": name,
+                        "scopes": [scope for scope, _ in scope_pairs],
+                    }
+                    for identifier, name, scope_pairs in RESOURCE_SERVERS
+                ],
+            }
+            for lane_id, pool_id in pools
+        ],
+        "scopes": list(SAGE_SCOPES),
+    }
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -524,9 +577,60 @@ def deploy(
 
 
 def main() -> int:
-    """Configure both existing pools and save trusted tenant-lane output."""
+    """Configure both existing pools, or reconcile only their resource servers."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--resource-servers-only",
+        action="store_true",
+        help=(
+            "Create or update only the Sage resource servers and scopes. Needs "
+            "just <PREFIX>_USER_POOL_ID, so it runs before any Agent Runtime "
+            "exists."
+        ),
+    )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        help="Print the plan and exit without calling AWS.",
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required to mutate Cognito with --resource-servers-only.",
+    )
+    args = parser.parse_args()
+
     try:
+        if args.resource_servers_only:
+            pools = load_resource_server_pool_ids()
+            if args.render or not args.confirm:
+                print(json.dumps(render_resource_servers(pools), indent=2))
+                if not args.render:
+                    print(
+                        "Refusing to mutate Cognito without --confirm.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                return 0
+            cognito = boto3.client("cognito-idp", region_name=REGION)
+            for _, pool_id in pools:
+                configure_resource_scopes(cognito, pool_id)
+            print(f"Reconciled Sage resource servers in {len(pools)} pools")
+            return 0
+
         lanes = load_lane_inputs()
+        if args.render:
+            print(
+                json.dumps(
+                    {
+                        "awsMutationCallsIssued": 0,
+                        "action": "preflight both lanes, then scopes and clients",
+                        "lanes": [lane.lane_id for lane in lanes],
+                    },
+                    indent=2,
+                )
+            )
+            return 0
         cognito = boto3.client("cognito-idp", region_name=REGION)
         lambda_client = boto3.client("lambda", region_name=REGION)
         output = deploy(cognito, lambda_client, lanes)

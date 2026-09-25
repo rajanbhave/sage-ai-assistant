@@ -37,10 +37,12 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
 import boto3
+from botocore.exceptions import ClientError
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -64,6 +66,10 @@ DOOR_SCOPE = {
     "agent": "sage-agent/invoke",
     "gateway": "sage-gateway/invoke",
     "mcp": "sage-mcp/invoke",
+    # Manifest door names, so canary fixtures can use the same keys as
+    # managedAuthorizers[].door.
+    "agent_runtime": "sage-agent/invoke",
+    "mcp_runtime": "sage-mcp/invoke",
 }
 CREDENTIAL_PATTERNS = (
     "Bearer ey",
@@ -453,6 +459,7 @@ def check_rejections(
     region: str,
     correlation_id: str,
     skip_agent: bool,
+    fixtures: Mapping[str, Any] = MappingProxyType({}),
 ) -> None:
     """Every managed door must reject the other lane and malformed credentials."""
     level = "managed_door_rejection"
@@ -508,16 +515,175 @@ def check_rejections(
             "expired access token",
             "token lifetime is 60 minutes; needs a scheduled long-running job",
         ),
-        (
-            "valid token from an unapproved app client",
-            "requires provisioning an unapproved client in a lane pool",
-        ),
-        (
-            "per-door missing-scope canary users",
-            "requires four canary users with restricted scope grants",
-        ),
     ):
         rec.record(level, name, "401 or 403", f"not covered: {reason}", None)
+
+    check_unapproved_client(rec, lanes, fixtures, region, correlation_id, skip_agent)
+    check_scope_canaries(rec, lanes, fixtures, region, correlation_id, skip_agent)
+
+
+def door_urls(
+    lane: Mapping[str, Any], region: str, skip_agent: bool
+) -> dict[str, str]:
+    """Map door name to the URL a direct POST reaches it on."""
+    doors = {
+        "gateway": str(lane["gatewayTargetUrl"]),
+        "mcp_runtime": runtime_url(
+            region, lane["mcpRuntimeArn"], lane["mcpRuntimeQualifier"]
+        ),
+    }
+    if not skip_agent:
+        doors["agent_runtime"] = str(lane["agentRuntimeEndpoint"])
+    return doors
+
+
+def door_body(door: str) -> dict[str, Any]:
+    return {"prompt": "ping"} if door == "agent_runtime" else INITIALIZE
+
+
+def authenticate_user(client_id: str, user: Mapping[str, Any]) -> str:
+    """Return one access token. Credentials are never printed or stored."""
+    return boto3.client("cognito-idp").initiate_auth(
+        ClientId=client_id,
+        AuthFlow="USER_PASSWORD_AUTH",
+        AuthParameters={
+            "USERNAME": str(user["username"]),
+            "PASSWORD": str(user["password"]),
+        },
+    )["AuthenticationResult"]["AccessToken"]
+
+
+def check_unapproved_client(
+    rec: Recorder,
+    lanes: Mapping[str, Mapping[str, Any]],
+    fixtures: Mapping[str, Any],
+    region: str,
+    correlation_id: str,
+    skip_agent: bool,
+) -> None:
+    """A structurally valid token from a client outside allowedClients must fail.
+
+    Same pool, same signing key, same tenant claim; only ``client_id`` differs.
+    This is the check that proves ``allowedClients`` is doing work rather than the
+    signature alone.
+    """
+    level = "managed_door_rejection"
+    for lane_id, lane in lanes.items():
+        fixture = fixtures.get(lane_id, {})
+        client_id = fixture.get("unapprovedClientId")
+        user = fixture.get("unapprovedClientUser") or fixture
+        if not client_id:
+            rec.record(
+                level,
+                "valid token from an unapproved app client",
+                "401 or 403",
+                "no unapprovedClientId fixture for this lane",
+                None,
+                lane_id,
+            )
+            continue
+        try:
+            token = authenticate_user(str(client_id), user)
+        except ClientError as error:
+            rec.record(
+                level,
+                "valid token from an unapproved app client",
+                "401 or 403",
+                f"fixture client could not authenticate: {error.response['Error']['Code']}",
+                None,
+                lane_id,
+            )
+            continue
+        for door, url in door_urls(lane, region, skip_agent).items():
+            status, _ = post_json(
+                url, bearer(token, correlation_id), door_body(door)
+            )
+            rec.record(
+                level,
+                f"{door} rejects a token from an unapproved app client",
+                "401 or 403",
+                str(status),
+                status in REJECT_STATUSES,
+                lane_id,
+            )
+
+
+def check_scope_canaries(
+    rec: Recorder,
+    lanes: Mapping[str, Mapping[str, Any]],
+    fixtures: Mapping[str, Any],
+    region: str,
+    correlation_id: str,
+    skip_agent: bool,
+) -> None:
+    """Each canary user's grant omits exactly one door scope; that door must fail.
+
+    A canary proves the door reads ``allowedScopes`` instead of accepting any
+    valid same-lane token. The other doors are not asserted, because a canary
+    missing one scope still legitimately holds the rest.
+    """
+    level = "managed_door_rejection"
+    for lane_id, lane in lanes.items():
+        canaries = fixtures.get(lane_id, {}).get("canaryUsers") or {}
+        urls = door_urls(lane, region, skip_agent)
+        if not canaries:
+            rec.record(
+                level,
+                "per-door missing-scope canary users",
+                "401 or 403",
+                "no canaryUsers fixture for this lane",
+                None,
+                lane_id,
+            )
+            continue
+        client_id = lane["frontendClientIds"][0]
+        for door, url in urls.items():
+            user = canaries.get(door)
+            if not user:
+                rec.record(
+                    level,
+                    f"{door} rejects a token missing only its own scope",
+                    "401 or 403",
+                    f"no canaryUsers.{door} fixture",
+                    None,
+                    lane_id,
+                )
+                continue
+            try:
+                token = authenticate_user(str(client_id), user)
+            except ClientError as error:
+                rec.record(
+                    level,
+                    f"{door} rejects a token missing only its own scope",
+                    "401 or 403",
+                    f"canary could not authenticate: {error.response['Error']['Code']}",
+                    None,
+                    lane_id,
+                )
+                continue
+            scopes = str(claims_of(token).get("scope", "")).split()
+            expected_absent = DOOR_SCOPE[door]
+            if expected_absent in scopes:
+                rec.record(
+                    level,
+                    f"{door} canary token omits {expected_absent}",
+                    f"{expected_absent} absent",
+                    "present; the canary grant is not restricted",
+                    False,
+                    lane_id,
+                )
+                continue
+            status, _ = post_json(
+                url, bearer(token, correlation_id), door_body(door)
+            )
+            rec.record(
+                level,
+                f"{door} rejects a token missing only its own scope",
+                "401 or 403",
+                str(status),
+                status in REJECT_STATUSES,
+                lane_id,
+            )
 
 
 def check_isolation(
@@ -771,7 +937,10 @@ def main() -> None:
     check_tokens(rec, lanes, sessions)
 
     print("=== level 2: managed door rejection ===")
-    check_rejections(rec, lanes, sessions, region, correlation_id, args.skip_agent)
+    fixtures = json.loads(args.credentials.read_text())
+    check_rejections(
+        rec, lanes, sessions, region, correlation_id, args.skip_agent, fixtures
+    )
 
     print("=== level 3: end-to-end tenant isolation ===")
     check_isolation(rec, lanes, sessions, correlation_id, args.skip_agent)

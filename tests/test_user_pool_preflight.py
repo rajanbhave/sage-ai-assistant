@@ -8,21 +8,25 @@ from scripts.deploy_user_pool import (
     _verify_pre_token_customizer,
     verify_lane_preflight,
 )
+from tests.env import topology
+
+POOL_ID = topology("SAGE_TEST_TENANT_A_USER_POOL_ID")
+CLIENT_ID = topology("SAGE_TEST_TENANT_A_CLIENT_ID")
+ALIAS_ARN = topology("SAGE_TEST_TENANT_A_PRE_TOKEN_LAMBDA_ARN")
+AGENT_ENDPOINT = topology("SAGE_TEST_TENANT_A_AGENT_RUNTIME_ENDPOINT")
 
 
 def lane() -> LaneInput:
     return LaneInput(
         lane_id="Tenant_A",
         tenant_id="Tenant_A",
-        user_pool_id="pool-a",
+        user_pool_id=POOL_ID,
         client_name="client-a",
         expected_tenant_claim="Tenant_A",
         trusted_assignment_attribute="custom:tenant",
-        pre_token_lambda_arn=(
-            "arn:aws:lambda:us-east-1:123456789012:function:sage-token-a:live"
-        ),
+        pre_token_lambda_arn=ALIAS_ARN,
         pre_token_lambda_code_sha256="approved-code-hash",
-        agent_runtime_endpoint="https://agent.example/invocations",
+        agent_runtime_endpoint=AGENT_ENDPOINT,
         approved_access_token_validity=60,
         approved_access_token_validity_unit="minutes",
         token_lifetime_approval_reference="approval-1",
@@ -40,15 +44,15 @@ class LambdaClient:
                     "Variables": {
                         "SAGE_TOKEN_CUSTOMIZER_CONFIG": json.dumps(
                             {
-                                "userPoolId": "pool-a",
+                                "userPoolId": POOL_ID,
                                 "expectedTenant": "Tenant_A",
                                 "canonicalTenantClaimName": "custom:tenant_id",
                                 "trustedAssignmentAttribute": "custom:tenant",
-                                "trustedClientIds": ["client-id-a"],
+                                "trustedClientIds": [CLIENT_ID],
                                 "scopeGrants": [
                                     {
                                         "subject": "subject-a",
-                                        "clientId": "client-id-a",
+                                        "clientId": CLIENT_ID,
                                         "scopes": ["sage-agent/invoke"],
                                     }
                                 ],
@@ -109,7 +113,7 @@ def test_preflight_rejects_a_v1_trigger_on_a_supported_plan():
 
 def test_preflight_verifies_qualified_code_and_lane_configuration():
     assert (
-        _verify_pre_token_customizer(LambdaClient(), lane(), "client-id-a")
+        _verify_pre_token_customizer(LambdaClient(), lane(), CLIENT_ID)
         == "approved-code-hash"
     )
 
@@ -117,17 +121,12 @@ def test_preflight_verifies_qualified_code_and_lane_configuration():
         _verify_pre_token_customizer(
             LambdaClient(),
             replace(lane(), pre_token_lambda_code_sha256="wrong"),
-            "client-id-a",
+            CLIENT_ID,
         )
 
     with pytest.raises(ValueError, match="immutable version or alias"):
         _verify_pre_token_customizer(
             LambdaClient(),
-            replace(
-                lane(),
-                pre_token_lambda_arn=(
-                    "arn:aws:lambda:us-east-1:123456789012:function:sage-token-a"
-                ),
-            ),
-            "client-id-a",
+            replace(lane(), pre_token_lambda_arn=ALIAS_ARN.rsplit(":", 1)[0]),
+            CLIENT_ID,
         )

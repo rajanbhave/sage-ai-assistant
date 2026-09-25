@@ -18,17 +18,25 @@ REQUIRED_DOOR_SCOPES: Final = MappingProxyType(
 
 def render_lane_authorizers(
     lane: TenantLaneConfiguration,
+    *,
+    mcp_allowed_gateway_arn: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Render the three managed JWT authorizers for one tenant lane.
 
     Args:
         lane: Trusted immutable configuration for the hosting tenant lane.
+        mcp_allowed_gateway_arn: When set, restrict the MCP Runtime authorizer to
+            that Gateway as the only allowed workload in the request identity
+            chain. AWS documents ``allowedWorkloadConfiguration`` as supported
+            only for AgentCore Runtime targets, with AgentCore Gateways as the
+            allowed workloads, so this is rendered only for a Runtime-target
+            topology and is omitted by default.
 
     Returns:
         Agent Runtime, Gateway, and MCP Runtime authorizer payloads keyed by
         managed-door name.
     """
-    return {
+    authorizers = {
         door.value: {
             "customJWTAuthorizer": {
                 "discoveryUrl": lane.discovery_url,
@@ -58,3 +66,10 @@ def render_lane_authorizers(
         }
         for door, scope in REQUIRED_DOOR_SCOPES.items()
     }
+    if mcp_allowed_gateway_arn is not None:
+        if not mcp_allowed_gateway_arn.strip():
+            raise ValueError("allowed Gateway ARN must be non-empty when provided")
+        authorizers[ManagedDoor.MCP_RUNTIME.value]["customJWTAuthorizer"][
+            "allowedWorkloadConfiguration"
+        ] = {"hostingEnvironments": [{"arn": mcp_allowed_gateway_arn}]}
+    return authorizers

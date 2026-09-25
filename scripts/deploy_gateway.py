@@ -206,6 +206,79 @@ GATEWAY_ROLE_NAME = "sage-gateway-role"
 GATEWAY_INVOKE_POLICY_NAME = "SageGatewayInvokeMcpRuntimes"
 
 
+def render_runtime_target_candidate(
+    configuration: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Render the AgentCore Runtime target alternative to the passthrough target.
+
+    Route C deploys ``http.passthrough``, for which AWS documents no verifiable
+    Gateway source signal, so any same-lane caller with a valid token reaches the
+    MCP Runtime. AWS documents two facts that make a Runtime-type target the
+    candidate fix:
+
+    - "``JWT_PASSTHROUGH`` is only available for HTTP targets (passthrough and
+      AgentCore Runtime)" — gateway-building-adding-targets-authorization.
+    - ``allowedWorkloadConfiguration`` "is supported only for AgentCore Runtime
+      targets, and the allowed workloads are AgentCore Gateways" —
+      CustomJWTAuthorizerConfiguration.
+
+    This renderer is deliberately not wired into any apply path. A probe during
+    deployment had an ``http.agentcoreRuntime`` target rejected on a gateway with
+    ``protocolType: MCP``, so the combination is documented but not observed here.
+    Proving it requires a throwaway gateway, which is a mutation.
+    """
+    region = _required_text(configuration, "region")
+    raw_lanes = configuration.get("lanes")
+    if not isinstance(raw_lanes, list) or not all(
+        isinstance(lane, dict) for lane in raw_lanes
+    ):
+        raise ValueError("lanes must be a list of records")
+
+    candidates: list[dict[str, Any]] = []
+    for lane in sorted(raw_lanes, key=lambda item: item["laneId"]):
+        lane_id = _required_text(lane, "laneId")
+        runtime_arn = _required_text(lane, "mcpRuntimeArn")
+        # Validates region and ARN shape; the URL itself is unused here because
+        # "the gateway resolves the runtime endpoint internally".
+        compose_mcp_runtime_invocation_url(
+            region, runtime_arn, _required_text(lane, "mcpRuntimeQualifier")
+        )
+        candidates.append(
+            {
+                "laneId": lane_id,
+                "gatewayIdentifier": _required_text(lane, "gatewayId"),
+                "name": f"sage-mcp-runtime-{lane_id.lower().replace('_', '-')}",
+                "description": f"{lane_id} Sage MCP AgentCore Runtime target",
+                "targetConfiguration": {
+                    "http": {
+                        "agentcoreRuntime": {
+                            "arn": runtime_arn,
+                            "qualifier": _required_text(
+                                lane, "mcpRuntimeQualifier"
+                            ),
+                        }
+                    }
+                },
+                "credentialProviderConfigurations": list(_TARGET_CREDENTIALS),
+                "mcpRuntimeAuthorizerAddition": {
+                    "allowedWorkloadConfiguration": {
+                        "hostingEnvironments": [
+                            {"arn": _required_text(lane, "gatewayArn")}
+                        ]
+                    }
+                }
+                if lane.get("gatewayArn")
+                else {
+                    "unavailable": (
+                        "manifest has no gatewayArn; the allowed workload ARN "
+                        "cannot be rendered without it"
+                    )
+                },
+            }
+        )
+    return candidates
+
+
 def gateway_trust_policy(account_id: str, region: str) -> dict[str, Any]:
     """Build the documented Gateway trust policy with confused-deputy guards.
 
@@ -459,6 +532,15 @@ def main() -> None:
     )
     parser.add_argument("--render", action="store_true")
     parser.add_argument(
+        "--render-runtime-target-candidate",
+        action="store_true",
+        help=(
+            "Print the AgentCore Runtime target and MCP Runtime "
+            "allowedWorkloadConfiguration that would restrict the MCP Runtime to "
+            "its own Gateway. Render only; never applied."
+        ),
+    )
+    parser.add_argument(
         "--ensure-gateways",
         action="store_true",
         help="Create the Gateway role and any missing lane Gateway, then exit.",
@@ -466,6 +548,20 @@ def main() -> None:
     args = parser.parse_args()
 
     configuration = json.loads(args.config.read_text(encoding="utf-8"))
+    if args.render_runtime_target_candidate:
+        print(
+            json.dumps(
+                {
+                    "awsMutationCallsIssued": 0,
+                    "applied": False,
+                    "status": "DOCUMENTED_NOT_OBSERVED",
+                    "candidates": render_runtime_target_candidate(configuration),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
     if args.render:
         print(json.dumps(render_gateway_targets(configuration), sort_keys=True))
         return

@@ -9,8 +9,11 @@ from scripts.bootstrap_tenant_pool import (
     _verify_adopted_pool,
     attach_pre_token_trigger,
 )
+from tests.env import topology
 
-ALIAS_ARN = "arn:aws:lambda:us-east-1:123456789012:function:sage-token-a:live"
+ALIAS_ARN = topology("SAGE_TEST_TENANT_A_PRE_TOKEN_LAMBDA_ARN")
+POOL_ID = topology("SAGE_TEST_TENANT_A_USER_POOL_ID")
+POOL_NAME = topology("SAGE_TEST_TENANT_A_POOL_NAME")
 
 
 class Cognito:
@@ -31,7 +34,7 @@ class Cognito:
 
 def supported_pool(**overrides: Any) -> dict[str, Any]:
     pool = {
-        "Name": "sage-tenant-a",
+        "Name": POOL_NAME,
         "UserPoolTier": "ESSENTIALS",
         "SchemaAttributes": [
             {"Name": ASSIGNMENT_ATTRIBUTE, "AttributeDataType": "String"}
@@ -46,7 +49,7 @@ def test_adopting_a_pool_on_an_unsupported_plan_states_cause_and_fix():
     cognito = Cognito(supported_pool(UserPoolTier="LITE"))
 
     with pytest.raises(ValueError) as rejected:
-        _verify_adopted_pool(cognito, "pool-a", "sage-tenant-a")
+        _verify_adopted_pool(cognito, POOL_ID, POOL_NAME)
 
     message = str(rejected.value)
     assert "cannot deliver V2_0 pre-token events" in message
@@ -57,10 +60,10 @@ def test_adopting_a_pool_on_an_unsupported_plan_states_cause_and_fix():
 def test_attach_writes_v2_config_and_mirrors_the_legacy_field_when_present():
     """The legacy single-version field must not keep pointing somewhere else."""
     cognito = Cognito(
-        supported_pool(LambdaConfig={"PreTokenGeneration": "arn:aws:lambda:stale"})
+        supported_pool(LambdaConfig={"PreTokenGeneration": ALIAS_ARN.replace(":live", ":stale")})
     )
 
-    attach_pre_token_trigger(cognito, "pool-a", ALIAS_ARN)
+    attach_pre_token_trigger(cognito, POOL_ID, ALIAS_ARN)
 
     written = cognito.updates[0]["LambdaConfig"]
     assert written["PreTokenGenerationConfig"] == {
@@ -75,7 +78,7 @@ def test_attach_writes_v2_config_and_mirrors_the_legacy_field_when_present():
 def test_attach_leaves_the_legacy_field_absent_when_the_pool_has_none():
     cognito = Cognito(supported_pool())
 
-    attach_pre_token_trigger(cognito, "pool-a", ALIAS_ARN)
+    attach_pre_token_trigger(cognito, POOL_ID, ALIAS_ARN)
 
     assert "PreTokenGeneration" not in cognito.updates[0]["LambdaConfig"]
 
@@ -95,15 +98,16 @@ def test_attach_rejects_a_readback_that_is_not_v2():
             return {}
 
     with pytest.raises(ValueError, match="readback does not match"):
-        attach_pre_token_trigger(Downgrading(supported_pool()), "pool-a", ALIAS_ARN)
+        attach_pre_token_trigger(Downgrading(supported_pool()), POOL_ID, ALIAS_ARN)
 
 
 def test_attach_requires_a_qualified_alias_arn():
     cognito = Cognito(supported_pool())
 
     with pytest.raises(ValueError):
+        # An unqualified ARN: the alias or version suffix removed.
         attach_pre_token_trigger(
-            cognito, "pool-a", "arn:aws:lambda:us-east-1:123456789012:function:sage"
+            cognito, POOL_ID, ALIAS_ARN.rsplit(":", 1)[0]
         )
 
     assert cognito.updates == []

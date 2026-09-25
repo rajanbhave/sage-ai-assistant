@@ -474,7 +474,7 @@ Credential-bearing boundary fields are typed. Values originating in Authorizatio
 
 One opaque, non-secret correlation ID is established per invocation and propagated unchanged through the selected lane and shared API. Each door exposes correlation ID, door identity, lane identity, verified subject, signed tenant, and outcome to `agent-audit-observability` without exposing the token.
 
-For each MCP Runtime, the Source Signal Proof Gate records documentation evidence, deployed configuration evidence, and behavioral verification for the exact HTTP MCP passthrough plus `JWT_PASSTHROUGH` topology. `allowedWorkloadConfiguration` is candidate-only. If a Verifiable Gateway Source Signal is proven, the MCP Runtime restricts requests to its same-lane Gateway and rejects missing or wrong signals; if not, the control is recorded as unavailable and the design makes no same-lane Gateway source-restriction claim. Regardless of that result, each MCP Runtime unconditionally enforces lane issuer, trusted client, `token_use=access`, local scope, and cross-lane rejection. Sage API unconditionally accepts network requests only from the two documented Sage MCP Approved Source Paths and customer-application Approved Source Paths. Correlation is operational evidence, not a cryptographic actor chain.
+For each MCP Runtime, the Source Signal Proof Gate records documentation evidence, deployed configuration evidence, and behavioral verification for the exact HTTP MCP passthrough plus `JWT_PASSTHROUGH` topology. `allowedWorkloadConfiguration` is candidate-only, and AWS documents it as supported only for AgentCore Runtime targets with AgentCore Gateways as the allowed workloads, so it does not apply to an `http.passthrough` target at all; a Runtime-type target is the documented path to a Gateway source signal and is recorded as documented-not-observed in the deviations section. If a Verifiable Gateway Source Signal is proven, the MCP Runtime restricts requests to its same-lane Gateway and rejects missing or wrong signals; if not, the control is recorded as unavailable and the design makes no same-lane Gateway source-restriction claim. Regardless of that result, each MCP Runtime unconditionally enforces lane issuer, trusted client, `token_use=access`, local scope, and cross-lane rejection. Sage API unconditionally accepts network requests only from the two documented Sage MCP Approved Source Paths and customer-application Approved Source Paths. Correlation is operational evidence, not a cryptographic actor chain, and does not distinguish agent-mediated from direct action; see the deviations section.
 
 ## Data Models
 
@@ -732,14 +732,108 @@ dead public artifact, and `deploy_sage_api.py` deletes one left by an earlier ru
 
 ### No same-lane Gateway source restriction
 
-The manifest records `sourceSignalAvailable: false` for both lanes, with evidence
-text stating that no reviewed AWS documentation establishes a verifiable Gateway
-source signal for an HTTP passthrough target with `protocolType: MCP` and
-`JWT_PASSTHROUGH`. The Source Signal Proof Gate therefore does not open.
+The manifest records `sourceSignalAvailable: false` for both lanes. The Source
+Signal Proof Gate does not open, so an MCP Runtime accepts a valid same-lane token
+from any caller, not only from its own Gateway. Cross-lane isolation is unaffected
+— a wrong-lane token is rejected by the managed authorizer before application code
+runs.
 
-Consequence: an MCP Runtime accepts a valid same-lane token from any caller, not
-only from its own Gateway. Cross-lane isolation is unaffected — a wrong-lane token
-is rejected by the managed authorizer before application code runs.
+The earlier evidence text said no reviewed documentation establishes a verifiable
+Gateway source signal. That was imprecise. What the documentation establishes is
+that the mechanism exists but does not apply to the target type this deployment
+uses:
+
+- `allowedWorkloadConfiguration` "restricts which workloads in the request's
+  identity chain are allowed to invoke the target… At launch, this is supported
+  only for **AgentCore Runtime targets**, and the allowed workloads are AgentCore
+  Gateways." (`CustomJWTAuthorizerConfiguration`)
+- "`JWT_PASSTHROUGH` is only available for HTTP targets (**passthrough and
+  AgentCore Runtime**)." (`gateway-building-adding-targets-authorization`)
+- An AgentCore Runtime target takes `{"http": {"agentcoreRuntime": {"arn", …}}}`
+  and "the gateway resolves the runtime endpoint internally", with a default
+  schema applied automatically for MCP-protocol runtimes.
+  (`gateway-target-http-runtime`)
+
+So the two features are documented as compatible: a Runtime-type target can carry
+`JWT_PASSTHROUGH` **and** accept `allowedWorkloadConfiguration`, which is exactly
+what would close this deviation. Route C deploys an `http.passthrough` target,
+which supports `JWT_PASSTHROUGH` but not the workload restriction.
+
+Status: **documented, not observed.** A probe during deployment had an
+`http.agentcoreRuntime` target rejected on a gateway with `protocolType: MCP`, so
+the documented combination has not been reproduced in this account. Proving it
+requires creating a throwaway gateway, which is a mutation and is out of scope for
+a read-only review. The candidate configuration is rendered, never applied, by
+`scripts/deploy_gateway.py --render-runtime-target-candidate`, and
+`render_lane_authorizers(lane, mcp_allowed_gateway_arn=…)` renders the matching
+MCP Runtime authorizer addition. The deviation stays open until a live probe
+succeeds.
+
+### No actor chain, so audit cannot distinguish agent-mediated from direct action
+
+This is a customer requirement, not a spec footnote. The customer requires audit
+to distinguish "I updated it" from "the agent updated it on my behalf".
+
+Route C forwards one bearer carrying all four scopes and adds no actor chain, so
+the Sage API audit event holds the verified subject and tenant and nothing that
+separates the two cases. Two concrete consequences:
+
+1. An action taken by the agent on a user's behalf and the same action taken by
+   that user directly are indistinguishable in the audit record.
+2. A browser token holder can call Sage MCP or the Sage API directly with the same
+   bearer, because every door accepts the same token. Nothing marks such a call as
+   having bypassed the agent.
+
+Correlation ID and door identity are recorded, so a *reconstruction* is possible
+when logs from every door are available and complete. That is operational
+evidence, not an authorization-time distinction, and it fails closed to neither
+answer if a log is missing.
+
+What closes it: an on-behalf-of exchange at a non-Cognito authorization server
+that issues a token carrying both the user and the agent as distinct actors, or a
+signed context assertion the agent attaches and the API verifies alongside the
+user token. Both add a component Route C deliberately excludes, so neither is a
+configuration change.
+
+Demo-day disclosure item: state plainly that per-action attribution of
+agent-mediated versus direct action is not implemented, and that the audit record
+answers "which subject and tenant" rather than "who acted through whom".
+
+### The two-lane silo is hardcoded and needs a conscious scaling decision
+
+Route C implements the silo pattern fixed at exactly two lanes. The limit is
+structural, not configuration: `sage_identity/models.py` and `sage_api/identity.py`
+gate on `_REQUIRED_TENANTS`, the API issuer map must hold exactly two complete
+entries, and `scripts/plan_identity_deployment.py`,
+`scripts/render_identity_deployments.py`, and `scripts/deploy_gateway.py` each
+reject any manifest that is not exactly `Tenant_A` and `Tenant_B`.
+
+Per tenant, a lane is a Cognito pool, a pre-token Lambda, an Agent Runtime, a
+Gateway, and an MCP Runtime. At 10–20 tenants with multiple workspaces each —
+roughly 100 environments — that multiplies into hundreds of managed resources,
+each with its own authorizer configuration, deployment, and rollback state, while
+the customer runs a pool model for the data itself. Silo identity over pooled data
+is a deliberate mismatch that has to be chosen, not inherited from this proof of
+concept.
+
+To lift the two-lane limit, all of the following change:
+
+- `_REQUIRED_TENANTS` and the `lane_id == tenant_id` invariant in
+  `sage_identity/models.py`.
+- The exactly-two issuer map in `sage_api/identity.py`, which becomes a lookup
+  that stays an exact server-controlled allowlist at whatever cardinality.
+- The exactly-two manifest validators in the three deployment scripts, and the
+  per-lane rollback-digest distinctness rule.
+- The frontend's fixed two-record trusted lane registry.
+- Requirement 1's cardinality clauses and every "exactly two" statement in this
+  design, including the six-authorizer rendering count.
+- Operationally: per-tenant Cognito quota, Lambda concurrency, Gateway and Runtime
+  service limits, and a provisioning pipeline, because a hundred lanes cannot be
+  deployed by the current scripts one lane at a time.
+
+No code changes for this here. The decision is whether to keep silo identity per
+tenant, move to a pooled identity provider with tenant as a verified claim, or run
+a hybrid where only regulated tenants get their own lane.
 
 ### The Sage API serves `$LATEST`
 
@@ -768,6 +862,20 @@ customer-approved-lifetime compensating control above is not yet satisfied.
   `PUBLIC_AUTH_FLOWS` in `deploy_user_pool.py`.
 - Demo user passwords were generated during deployment rather than supplied by an
   operator, and live in a gitignored local file with mode 600.
+
+### The browser authenticates with SRP username and password
+
+The frontend authenticates directly against each lane's Cognito pool with SRP
+username and password, and holds the resulting access token in the session layer.
+This matches the customer's real Lambda-to-Cognito flow, so it is the authoritative
+browser authentication model for this branch.
+
+Authorization Code with PKCE through Cognito managed login remains the production
+target: it keeps the password out of the application entirely, gives a
+front-channel redirect that supports federation and MFA step-up, and removes the
+need for `ALLOW_USER_PASSWORD_AUTH` on a public client. Switching is a frontend and
+app-client change, not an identity-model change, because the bearer forwarded
+downstream is the same Cognito access token either way. No frontend change here.
 
 ### What `INACTIVE` means here
 
