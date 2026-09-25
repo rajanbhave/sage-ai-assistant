@@ -145,16 +145,6 @@ frozen into the function configuration. A Cognito signing-key rotation therefore
 requires re-running `deploy_sage_api.py`; until then a token signed by an
 unrecognized key fails closed with 403.
 
-Recommended order after configuration and security approval:
-
-```bash
-uv run python scripts/deploy_user_pool.py
-uv run python scripts/deploy_registry.py
-bash scripts/deploy_mcp.sh
-bash scripts/deploy_gateway.sh
-bash scripts/deploy_agent.sh
-```
-
 Useful read-only commands:
 
 ```bash
