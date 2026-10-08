@@ -388,7 +388,7 @@ def main() -> None:
     apigw = boto3.client("apigatewayv2", region_name=args.region)
 
     role_arn = ensure_role(iam)
-    package = build_zip(("sage_api", "sage_identity"), ("pyjwt[crypto]==2.13.0",))
+    package = build_zip(("sage_api", "sage_identity"), ("pyjwt[crypto]==2.15.1",))
     function_arn = deploy_function(lambda_client, role_arn, package, environment)
     lambda_client.put_function_concurrency(
         FunctionName=FUNCTION_NAME,

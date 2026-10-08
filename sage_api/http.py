@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
 
-import jwt
+from jwt.algorithms import RSAAlgorithm
 
 from sage_identity import (
     AllowedTenantIssuerMap,
@@ -63,7 +63,7 @@ def _keys_by_id(jwks: object) -> dict[str, object]:
     for key in keys:
         if not isinstance(key, Mapping) or not isinstance(key.get("kid"), str):
             raise ValueError("each JWKS entry requires a string key identifier")
-        selected[str(key["kid"])] = jwt.algorithms.RSAAlgorithm.from_jwk(
+        selected[str(key["kid"])] = RSAAlgorithm.from_jwk(
             json.dumps(dict(key))
         )
     return selected

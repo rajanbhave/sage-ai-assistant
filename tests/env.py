@@ -55,7 +55,7 @@ def topology(key: str) -> str:
     return value.strip()
 
 
-def lane_topology(lane_id: str) -> dict[str, str]:
+def lane_topology(lane_id: str) -> dict[str, str | list[str]]:
     """Return the manifest-shaped record for one lane."""
     prefix = f"SAGE_TEST_{lane_id.upper()}"
     return {

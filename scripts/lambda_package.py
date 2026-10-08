@@ -110,7 +110,7 @@ def main() -> None:
         raise SystemExit("uv is required to build Lambda packages")
 
     payload = build_zip(
-        ("sage_api", "sage_identity"), ("pyjwt[crypto]==2.13.0",)
+        ("sage_api", "sage_identity"), ("pyjwt[crypto]==2.15.1",)
     )
     if args.output is None:
         print(f"Built Sage API package: {len(payload):,} bytes")
