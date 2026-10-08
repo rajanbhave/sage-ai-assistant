@@ -20,6 +20,26 @@ def config():
     return McpIdentityConfiguration("Tenant_A", "Tenant_A", "custom:tenant_id")
 
 
+def test_request_generates_missing_correlation_and_validates_supplied_values(monkeypatch):
+    monkeypatch.setenv("SAGE_LANE_ID", "Tenant_A")
+    monkeypatch.setenv("SAGE_EXPECTED_TENANT", "Tenant_A")
+    monkeypatch.setenv("SAGE_CANONICAL_TENANT_CLAIM", "custom:tenant_id")
+    authorization = bearer(sub="user", **{"custom:tenant_id": "Tenant_A"})
+    headers = {"Authorization": authorization}
+    first = data_tools._get_request(headers)
+    second = data_tools._get_request(headers)
+    assert first.correlation_id != second.correlation_id
+    assert first.bearer._value == authorization.removeprefix("Bearer ")
+    assert first.identity.tenant_id == "Tenant_A"
+    supplied = data_tools._get_request({**headers, "X-Sage-Correlation-Id": "a" * 32})
+    assert supplied.correlation_id == CorrelationId("a" * 32)
+    for invalid in ("", "malformed", 42, ["a" * 32, "b" * 32]):
+        with pytest.raises(ToolError):
+            data_tools._get_request({**headers, "X-Sage-Correlation-Id": invalid})
+    with pytest.raises(ToolError):
+        data_tools._get_request({})
+
+
 def test_mcp_identity_extracts_managed_validated_subject_and_binds_hosting_lane():
     token = bearer(
         iss="not-reverified-by-the-application",
