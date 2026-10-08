@@ -433,6 +433,18 @@ Incrementally migrate the current Sage AI Assistant from its shared-pool, ID-tok
 - `dynamic-skills-system` is protected from Route C mutation or reuse, and a current valid `registry_output.json` is a mandatory deployment input.
 - Every Task 13 deployment item is required. Any failed gate stops the sequence, prevents partial activation, and retains or restores the approved rollback topology.
 
+## As-Deployed POC Status
+
+Where the deployed proof of concept diverges from this plan. Architecture and
+security deviations are recorded in `design.md` under "As-Deployed POC Deviations".
+
+- **Task 13.5 authorization was recorded after the fact.** The plan requires freezing the manifest digest and recording explicit human mutation authorization *before* the first AWS mutation. Cognito pools, the customizer Lambdas, the Sage API, and both Gateways were created before any such record existed. The retrospective record is kept locally and is explicitly marked `recordType: RETROSPECTIVE`; it is not committed because it carries account identifiers.
+- **Requirements 9.9 and 9.16–9.19 and Tasks 13.12/13.14 have nothing to roll back to.** The prior stack was deleted first at the operator's explicit instruction, so `rollbackTopology` holds `none-*` placeholders. The new stack is the only stack, and the approved rollback window cannot be honored for this deployment.
+- **`deploy_user_pool.py` has not run.** The `sage-*` resource servers therefore do not exist in either new pool and there is no `user_pool_output.json`. The four Sage scopes still reach access tokens because the `V2_0` customizer injects them, which is why nothing appears broken. Running it requires `<LANE>_AGENT_RUNTIME_ENDPOINT`, so it must follow the Agent Runtime deployment.
+- **Unrelated resources remain live in the account.** Four `emily_*`/`emily-*` resources were never cleaned up. All such references were removed from this repository; the AWS resources are outside the Route C teardown scope.
+- **Two negative live checks are implemented but unprovisioned.** `scripts/validate_route_c.py` now runs the unapproved-app-client and per-door missing-scope canary checks whenever the fixtures exist, and records `SKIP` naming the absent fixture otherwise, so a missing fixture can never read as a satisfied negative. The fixtures are deliberately weakened identities — a public app client absent from every `allowedClients`, and one user per door whose customizer grant omits exactly that door's scope — so `scripts/provision_validation_fixtures.py` creates them only under `--confirm`. Creating them also requires adding the printed `scopeGrants` entries to each lane's `SAGE_TOKEN_CUSTOMIZER_CONFIG`; until that edit a canary holds no scopes and the check would pass for the wrong reason. Neither has been run.
+- **Resource servers still do not exist, but no longer depend on the Agent Runtime.** `deploy_user_pool.py --resource-servers-only` reconciles the four Sage scopes from pool IDs alone, so the scopes can exist in Cognito before any Agent Runtime is deployed. The full run still needs `<PREFIX>_AGENT_RUNTIME_ENDPOINT`. Neither has been run.
+
 ## Task Dependency Graph
 
 ```json

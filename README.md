@@ -83,15 +83,67 @@ The agent requires `SKILL_REGISTRY_ID` and `GATEWAY_URL`; it loads approved skil
 
 Deployment scripts consume `scripts/identity_deployment.json` or the path in `SAGE_IDENTITY_CONFIG_FILE`. No cloud mutation is performed by the renderer or dry-run planner.
 
-Recommended order after configuration and security approval:
+### Route C deployment order
+
+Cognito must hold a lane's public client and demo subject before the access-token
+customizer configuration can name them, and the customizer must be an active
+`V2_0` trigger before `deploy_user_pool.py` will run. That fixes the order:
 
 ```bash
+# Per lane (Tenant_A shown; repeat for Tenant_B)
+TENANT_A_DEMO_PASSWORD=... uv run python scripts/bootstrap_tenant_pool.py \
+  create --lane Tenant_A --username axa-user --confirm
+
+uv run python scripts/deploy_pre_token_lambda.py --lane Tenant_A \
+  --user-pool-id <from bootstrap> --client-id <from bootstrap> \
+  --subject <from bootstrap>
+
+uv run python scripts/bootstrap_tenant_pool.py attach-trigger --lane Tenant_A \
+  --lambda-arn <alias ARN from the previous step> --confirm
+
+# Both lanes configured
 uv run python scripts/deploy_user_pool.py
+uv run python scripts/deploy_sage_api.py --region us-east-1 \
+  --lane-a-pool-id <id> --lane-a-client-id <id> \
+  --lane-b-pool-id <id> --lane-b-client-id <id> --allow-public-url
 uv run python scripts/deploy_registry.py
-bash scripts/deploy_mcp.sh
+
+# SAGE_API_URL comes from scripts/sage_api_output.json ("sageApiUrl")
+SAGE_API_URL=<sageApiUrl> bash scripts/deploy_mcp.sh
 bash scripts/deploy_gateway.sh
 bash scripts/deploy_agent.sh
 ```
+
+Every script renders a mutation-free plan with `--render` first. Mutating
+commands require explicit intent: `--confirm` for Cognito changes and
+`--allow-public-url` for the Sage API's internet-reachable endpoint.
+
+Runtime, Gateway, and pool names in the manifest must differ from any existing
+deployment, because `deploy_mcp.sh` and `deploy_agent.sh` pass `runtimeName`
+straight to `agentcore` and would otherwise update an existing runtime in place.
+
+### Shared Sage API hosting
+
+The Sage API is deployed as a Lambda behind an API Gateway HTTP API. The MCP
+Runtime calls it with the original user access token rather than SigV4, so the
+HTTP API carries no gateway-level authorizer and the endpoint is internet
+reachable. Authorization rests entirely on the API's own independent validation,
+and because a public endpoint has no trusted private ingress, the request-source
+control is deployment-asserted and is recorded as `unavailable` rather than
+claimed. Reserved concurrency bounds abuse and cost; place a throttle or WAF in
+front before any non-demo use.
+
+A Lambda Function URL was the approved hosting option and was built first, but
+every request to it returned `403 AccessDeniedException` without invoking the
+function, so the deployment pivoted to API Gateway. See the "As-Deployed POC
+Deviations" section of `.kiro/specs/multi-tenant-agent-identity/design.md` for
+that record. `deploy_sage_api.py` deletes a Function URL left behind by an
+earlier run rather than leaving it as a dead public artifact.
+
+Verification keys are read from each pool's published JWKS at deploy time and
+frozen into the function configuration. A Cognito signing-key rotation therefore
+requires re-running `deploy_sage_api.py`; until then a token signed by an
+unrecognized key fails closed with 403.
 
 Useful read-only commands:
 
@@ -118,6 +170,42 @@ Each tenant has its own values:
 - `VITE_TENANT_A_APP_CLIENT_ID`, `VITE_TENANT_B_APP_CLIENT_ID`
 - `VITE_TENANT_A_ISSUER`, `VITE_TENANT_B_ISSUER`
 - `VITE_TENANT_A_AGENT_RUNTIME_ENDPOINT`, `VITE_TENANT_B_AGENT_RUNTIME_ENDPOINT`
+
+Demonstration-only values, unset or `false` in any build that serves real users:
+
+- `VITE_DEMO_STAGE` — `true` enables the JWT-passthrough demo stage
+- `VITE_AWS_REGION` — optional, used only to build CloudWatch evidence links
+- `VITE_TENANT_A_LOG_GROUP`, `VITE_TENANT_B_LOG_GROUP` — optional, same purpose
+
+## JWT-passthrough demo stage
+
+`VITE_DEMO_STAGE=true` adds a Demo stage toggle beside Sign out. The stage draws the
+deployed Route C path and animates it from events this browser actually witnessed.
+
+Each node states the strength of its evidence, so no hop is animated as observed
+when it was not:
+
+| Evidence | Meaning |
+|---|---|
+| `observed` | The browser saw it directly: the Cognito result, the Agent Runtime response, the other lane's denial status |
+| `inferred` | Proven by a downstream observed outcome. The agent lists Gateway tools before streaming, so a first stream event proves the Gateway and MCP Runtime accepted the same bearer; a returned tool result proves the Sage API revalidated it and authorized this tenant |
+
+The claims panel shows the non-secret claim set every managed door validates and
+identifies the token by its `jti`. The bearer value is never displayed, logged,
+or copied into UI state.
+
+Presets run the real deployed path: a tenant-scoped product read, the shared
+`CLM-12345` reference that resolves to different records per tenant, and a
+prompt that asks the agent to switch tenants and cannot succeed.
+
+The Cross-lane probe sends the current bearer to the other lane's Agent Runtime
+and expects a managed denial. This is the one frontend action that deliberately
+targets an endpoint outside the selected lane, which is why it is gated on
+`VITE_DEMO_STAGE` and refused at the call site when that flag is absent. It is
+demonstration behaviour and must not be enabled in a build serving real users.
+
+Create `frontend/.env.local` with the variables above; `.env*` files are ignored
+by git apart from an `.env.example` template.
 
 ### Cognito pre-token Lambda
 
@@ -159,3 +247,63 @@ bash -n scripts/deploy_agent.sh scripts/deploy_gateway.sh scripts/deploy_mcp.sh
 cd frontend && npm test && npm run build
 git diff --check
 ```
+
+
+## Cognito access-token tenant claim: reference for Emil
+
+The failure this addresses: a pre-token Lambda that customizes only the **ID
+token**, so an MCP client forwarding the **access token** sees no tenant claim and
+the backend has nothing to authorize on. Five requirements, all enforced in this
+repository.
+
+**1. The pool must be on Essentials or Plus.** Only those feature plans deliver
+`V2_0` pre-token events, and `V2_0` is the only version that can add claims to an
+access token. A Lite pool silently customizes the ID token alone. Upgrade with:
+
+```bash
+aws cognito-idp update-user-pool --user-pool-id <pool-id> --user-pool-tier ESSENTIALS
+```
+
+There is a legacy exception: pools that had Advanced Security enabled before
+2024-11-22 may keep `V2_0` on Lite. `scripts/deploy_user_pool.py` accepts exactly
+that case — Lite passes the gate only when `V2_0` is already the active version —
+and otherwise refuses with the cause and the upgrade command.
+
+**2. The trigger must be `PreTokenGenerationConfig` with `LambdaVersion: V2_0`.**
+Setting only the legacy `LambdaConfig.PreTokenGeneration` field pins V1_0, which
+cannot touch the access token. `attach-trigger` in
+`scripts/bootstrap_tenant_pool.py` writes `PreTokenGenerationConfig` with the
+qualified alias ARN, mirrors the legacy field when the pool already has one so the
+two cannot disagree, resends every preserved pool setting because
+`UpdateUserPool` resets omitted values, and then reads the trigger back and fails
+if the result is not `V2_0` bound to that alias.
+
+**3. Emit the claim into both generations.** `sage_identity.cognito` returns the
+canonical tenant claim under `accessTokenGeneration.claimsToAddOrOverride` **and**
+`idTokenGeneration.claimsToAddOrOverride`. The access token is the only bearer,
+but web clients that still read the ID token keep working instead of regressing to
+an absent claim. Scope overrides stay on the access token alone.
+
+The claim name is configuration, not a constant: `canonicalTenantClaimName` is
+`custom:tenant_id` here and can be `custom:tenant_slug` elsewhere with no code
+change. Cognito-owned names (`iss`, `exp`, `sub`, `client_id`, `token_use`) are
+refused at configuration load.
+
+**4. The backend must read the access token and require `token_use=access`.**
+`sage_api/identity.py` validates the signature against the pool's published keys,
+then issuer, expiry, trusted client, `token_use == "access"`, the operation scope,
+and the exact tenant claim, before any claim becomes authority.
+
+**5. Never accept an ID token as the bearer.** An ID token is an authentication
+receipt for the client, not an authorization credential for an API: it carries
+`token_use: "id"`, its audience is the app client, and it has no scopes. The
+`token_use` check in step 4 is what rejects it — without that check, adding the
+tenant claim to the ID token in step 3 would turn a convenience into a
+vulnerability.
+
+In this repository the MCP application layer deliberately does **not** repeat the
+`token_use` check. The MCP Runtime's managed JWT authorizer enforces token type
+before application code runs, and the design's door table assigns signature,
+expiry, issuer, client, token type, and managed scope to that authorizer alone. A
+deployment without a managed authorizer in front of its MCP server must perform
+the step 4 validation itself.

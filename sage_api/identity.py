@@ -54,6 +54,26 @@ def select_issuer_configuration(
         raise _not_authorized(correlation_id) from None
 
 
+def _verification_key(candidate: object, encoded_jwt: str) -> object:
+    """Select one deployment-owned verification key for this token.
+
+    A Cognito user pool publishes several signing keys and signs a token with
+    any one of them, so a lane's configuration holds every key mapped by its key
+    identifier. The unverified ``kid`` header is used only to choose among that
+    fixed trusted set, exactly as the unverified issuer is used only to choose a
+    validation configuration. Verification still happens afterwards.
+    """
+    if not isinstance(candidate, Mapping):
+        return candidate
+    try:
+        kid = jwt.get_unverified_header(encoded_jwt).get("kid")
+    except Exception:
+        raise ValueError("access token header could not be read") from None
+    if not isinstance(kid, str) or kid not in candidate:
+        raise ValueError("no configured verification key matches the token")
+    return candidate[kid]
+
+
 def validate_access_token(
     encoded_jwt: str,
     allowed_issuers: AllowedTenantIssuerMap,
@@ -73,7 +93,9 @@ def validate_access_token(
         configuration = select_issuer_configuration(
             encoded_jwt, allowed_issuers, correlation_id
         )
-        verification_key = verification_keys[configuration.issuer]
+        verification_key = _verification_key(
+            verification_keys[configuration.issuer], encoded_jwt
+        )
         jwt.decode(
             encoded_jwt,
             verification_key,  # type: ignore[arg-type]

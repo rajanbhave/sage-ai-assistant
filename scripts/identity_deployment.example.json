@@ -1,0 +1,192 @@
+{
+  "acceptedTenantIds": [
+    "Tenant_A",
+    "Tenant_B"
+  ],
+  "approvalStatus": "PENDING",
+  "bearerTransport": {
+    "bearerMode": "ORIGINAL_USER_ACCESS_JWT",
+    "contextTokenEnabled": false,
+    "legacyM2mEnabled": false,
+    "oauthProviderEnabled": false,
+    "tokenExchangeEnabled": false,
+    "workloadTokenEnabled": false
+  },
+  "canonicalTenantClaimName": "custom:tenant_id",
+  "frontend": {
+    "deploymentAllowed": false
+  },
+  "lanes": [
+    {
+      "agentRuntimeEndpoint": "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-east-1%3A000000000000%3Aruntime%2Fsage_agent_tenant_a-EXAMPLE000/invocations?qualifier=DEFAULT",
+      "agentRuntimeId": "sage_agent_tenant_a",
+      "candidateState": "INACTIVE",
+      "discoveryUrl": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLEAA/.well-known/openid-configuration",
+      "expectedTenantClaim": "Tenant_A",
+      "frontendClientIds": [
+        "exampleclientidtenanta0000"
+      ],
+      "gatewayId": "sage-gw-tenant-a-example00",
+      "gatewayTarget": {
+        "credentialProviderType": "JWT_PASSTHROUGH",
+        "protocolType": "MCP",
+        "targetType": "HTTP_PASSTHROUGH"
+      },
+      "gatewayTargetUrl": "https://sage-gw-tenant-a-example00.gateway.bedrock-agentcore.us-east-1.amazonaws.com/sage-mcp-tenant-a/invocations",
+      "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLEAA",
+      "laneId": "Tenant_A",
+      "mcpRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/sage_mcp_tenant_a-EXAMPLE000",
+      "mcpRuntimeId": "sage_mcp_tenant_a",
+      "mcpRuntimeQualifier": "DEFAULT",
+      "rollbackTopology": {
+        "agentGatewayUrl": "https://no-prior-topology.invalid/tenant-a",
+        "gatewayRoute": "none-tenant-a",
+        "gatewayTargetId": "none-tenant-a"
+      },
+      "tenantId": "Tenant_A",
+      "userPoolId": "us-east-1_EXAMPLEAA"
+    },
+    {
+      "agentRuntimeEndpoint": "https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-east-1%3A000000000000%3Aruntime%2Fsage_agent_tenant_b-EXAMPLE000/invocations?qualifier=DEFAULT",
+      "agentRuntimeId": "sage_agent_tenant_b",
+      "candidateState": "INACTIVE",
+      "discoveryUrl": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLEBB/.well-known/openid-configuration",
+      "expectedTenantClaim": "Tenant_B",
+      "frontendClientIds": [
+        "exampleclientidtenantb0000"
+      ],
+      "gatewayId": "sage-gw-tenant-b-example00",
+      "gatewayTarget": {
+        "credentialProviderType": "JWT_PASSTHROUGH",
+        "protocolType": "MCP",
+        "targetType": "HTTP_PASSTHROUGH"
+      },
+      "gatewayTargetUrl": "https://sage-gw-tenant-b-example00.gateway.bedrock-agentcore.us-east-1.amazonaws.com/sage-mcp-tenant-b/invocations",
+      "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLEBB",
+      "laneId": "Tenant_B",
+      "mcpRuntimeArn": "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/sage_mcp_tenant_b-EXAMPLE000",
+      "mcpRuntimeId": "sage_mcp_tenant_b",
+      "mcpRuntimeQualifier": "DEFAULT",
+      "rollbackTopology": {
+        "agentGatewayUrl": "https://no-prior-topology.invalid/tenant-b",
+        "gatewayRoute": "none-tenant-b",
+        "gatewayTargetId": "none-tenant-b"
+      },
+      "tenantId": "Tenant_B",
+      "userPoolId": "us-east-1_EXAMPLEBB"
+    }
+  ],
+  "managedAuthorizers": [
+    {
+      "allowedClients": [
+        "exampleclientidtenanta0000"
+      ],
+      "allowedScopes": [
+        "sage-agent/invoke"
+      ],
+      "door": "agent_runtime",
+      "laneId": "Tenant_A",
+      "tokenUseEquals": "access"
+    },
+    {
+      "allowedClients": [
+        "exampleclientidtenanta0000"
+      ],
+      "allowedScopes": [
+        "sage-gateway/invoke"
+      ],
+      "door": "gateway",
+      "laneId": "Tenant_A",
+      "tokenUseEquals": "access"
+    },
+    {
+      "allowedClients": [
+        "exampleclientidtenanta0000"
+      ],
+      "allowedScopes": [
+        "sage-mcp/invoke"
+      ],
+      "door": "mcp_runtime",
+      "laneId": "Tenant_A",
+      "tokenUseEquals": "access"
+    },
+    {
+      "allowedClients": [
+        "exampleclientidtenantb0000"
+      ],
+      "allowedScopes": [
+        "sage-agent/invoke"
+      ],
+      "door": "agent_runtime",
+      "laneId": "Tenant_B",
+      "tokenUseEquals": "access"
+    },
+    {
+      "allowedClients": [
+        "exampleclientidtenantb0000"
+      ],
+      "allowedScopes": [
+        "sage-gateway/invoke"
+      ],
+      "door": "gateway",
+      "laneId": "Tenant_B",
+      "tokenUseEquals": "access"
+    },
+    {
+      "allowedClients": [
+        "exampleclientidtenantb0000"
+      ],
+      "allowedScopes": [
+        "sage-mcp/invoke"
+      ],
+      "door": "mcp_runtime",
+      "laneId": "Tenant_B",
+      "tokenUseEquals": "access"
+    }
+  ],
+  "protectedResources": [
+    {
+      "mutationAllowed": false,
+      "name": "dynamic-skills-system"
+    }
+  ],
+  "region": "us-east-1",
+  "registryOutputPath": "scripts/registry_output.json",
+  "sharedSageApi": {
+    "approvedSageMcpSourcePaths": [
+      "sage-mcp-runtime",
+      "sage-mcp-runtime-b"
+    ],
+    "candidateState": "INACTIVE",
+    "endpoint": "https://example000.execute-api.us-east-1.amazonaws.com",
+    "resourceName": "sage-api",
+    "sourceSignalClassification": "unavailable"
+  },
+  "sourceSignalProofs": [
+    {
+      "behavioralVerified": false,
+      "candidateMechanism": "allowedWorkloadConfiguration",
+      "deployedConfigurationEvidence": "Not configured: no allowedWorkloadConfiguration is applied to either MCP Runtime custom JWT authorizer, so no same-lane Gateway source restriction is claimed.",
+      "documentationEvidence": "No reviewed AWS documentation establishes a verifiable Gateway source signal for a Gateway HTTP passthrough target with protocolType MCP and JWT_PASSTHROUGH; allowedWorkloadConfiguration remains a candidate mechanism only.",
+      "exactTopologyDocumented": false,
+      "laneId": "Tenant_A",
+      "missingSourceRejectedBeforeProtectedBehavior": false,
+      "sameLaneConfigurationVerified": false,
+      "sourceSignalAvailable": false,
+      "wrongLaneSourceRejectedBeforeProtectedBehavior": false
+    },
+    {
+      "behavioralVerified": false,
+      "candidateMechanism": "allowedWorkloadConfiguration",
+      "deployedConfigurationEvidence": "Not configured: no allowedWorkloadConfiguration is applied to either MCP Runtime custom JWT authorizer, so no same-lane Gateway source restriction is claimed.",
+      "documentationEvidence": "No reviewed AWS documentation establishes a verifiable Gateway source signal for a Gateway HTTP passthrough target with protocolType MCP and JWT_PASSTHROUGH; allowedWorkloadConfiguration remains a candidate mechanism only.",
+      "exactTopologyDocumented": false,
+      "laneId": "Tenant_B",
+      "missingSourceRejectedBeforeProtectedBehavior": false,
+      "sameLaneConfigurationVerified": false,
+      "sourceSignalAvailable": false,
+      "wrongLaneSourceRejectedBeforeProtectedBehavior": false
+    }
+  ],
+  "tokenLifetimeApprovalReference": "REPLACE-WITH-YOUR-APPROVAL-REFERENCE"
+}

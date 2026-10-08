@@ -7,6 +7,7 @@ import os
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Never, TypeGuard, cast
 
 from .models import TENANT_A, TENANT_B
@@ -51,10 +52,21 @@ class AccessTokenCustomizerConfiguration:
     trusted_assignment_attribute: str
     trusted_client_ids: frozenset[str]
     scope_grants: tuple[AuthorizedScopeGrant, ...]
+    group_grants: Mapping[str, frozenset[str]] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trusted_client_ids", frozenset(self.trusted_client_ids))
         object.__setattr__(self, "scope_grants", tuple(self.scope_grants))
+        object.__setattr__(
+            self,
+            "group_grants",
+            MappingProxyType(
+                {
+                    group: frozenset(scopes)
+                    for group, scopes in dict(self.group_grants).items()
+                }
+            ),
+        )
         if any(
             not _non_empty(value)
             for value in (
@@ -69,8 +81,13 @@ class AccessTokenCustomizerConfiguration:
             raise ValueError("canonical tenant claim cannot replace a Cognito-owned claim")
         if self.expected_tenant not in {TENANT_A, TENANT_B}:
             raise ValueError("customizer tenant must be Tenant_A or Tenant_B")
-        if not self.trusted_client_ids or not self.scope_grants:
-            raise ValueError("customizer requires trusted clients and scope grants")
+        if not self.trusted_client_ids:
+            raise ValueError("customizer requires trusted clients")
+        if not self.scope_grants and not self.group_grants:
+            raise ValueError("customizer requires subject or group scope grants")
+        for group, scopes in self.group_grants.items():
+            if not _non_empty(group) or not scopes or not scopes <= SAGE_SCOPE_PROFILE:
+                raise ValueError("group grants must name a group and only Sage scopes")
         grant_keys = {(grant.subject, grant.client_id) for grant in self.scope_grants}
         if len(grant_keys) != len(self.scope_grants):
             raise ValueError("scope grants must be unique per subject and client")
@@ -86,7 +103,7 @@ def load_access_token_customizer_configuration(
         raw = json.loads(serialized)
         if not isinstance(raw, Mapping):
             raise ValueError("configuration must be an object")
-        grants_value = raw.get("scopeGrants")
+        grants_value = raw.get("scopeGrants", [])
         if not isinstance(grants_value, list):
             raise ValueError("scopeGrants must be a list")
         grants = tuple(
@@ -111,6 +128,7 @@ def load_access_token_customizer_configuration(
                 raw.get("trustedClientIds"), "trustedClientIds"
             ),
             scope_grants=grants,
+            group_grants=_group_grants(raw.get("groupGrants")),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("invalid token customizer configuration") from error
@@ -140,7 +158,8 @@ def customize_access_token(
         configuration: Trusted deployment configuration for the issuing lane.
 
     Returns:
-        A copy of ``event`` containing access-token claim and scope overrides.
+        A copy of ``event`` with access-token claim and scope overrides, plus the
+        same canonical tenant claim on the ID token for clients that read it.
 
     Raises:
         IdentityError: If the event is not bound to one valid lane assignment,
@@ -178,24 +197,77 @@ def customize_access_token(
         for grant in configuration.scope_grants
         if grant.subject == subject and grant.client_id == client_id
     ]
-    if len(grants) != 1:
+    if len(grants) > 1:
         _reject()
-    authorized_scopes = grants[0].scopes
+    # Group grants are additive; a subject grant remains the fallback so
+    # deployments with no groups configured behave exactly as before.
+    authorized_scopes = _resolve_authorized_scopes(request, configuration, grants)
+    if not authorized_scopes:
+        _reject()
 
     incoming_scopes = _scope_set(request.get("scopes"))
+    tenant_claim = {configuration.canonical_tenant_claim_name: tenant}
     result: dict[str, Any] = deepcopy(dict(event))
     result["response"] = {
         "claimsAndScopeOverrideDetails": {
             "accessTokenGeneration": {
-                "claimsToAddOrOverride": {
-                    configuration.canonical_tenant_claim_name: tenant,
-                },
+                "claimsToAddOrOverride": dict(tenant_claim),
                 "scopesToAdd": sorted(authorized_scopes - incoming_scopes),
                 "scopesToSuppress": sorted(incoming_scopes - authorized_scopes),
-            }
+            },
+            # The access token is the only Route C bearer, but clients that still
+            # read the ID token must see the same tenant value rather than none.
+            # Scopes are deliberately not overridden here: scope authority belongs
+            # to the access token alone.
+            "idTokenGeneration": {
+                "claimsToAddOrOverride": dict(tenant_claim),
+            },
         }
     }
     return result
+
+
+def _resolve_authorized_scopes(
+    request: Mapping[str, object],
+    configuration: AccessTokenCustomizerConfiguration,
+    subject_grants: Sequence[AuthorizedScopeGrant],
+) -> frozenset[str]:
+    """Union the subject grant with every configured group the token carries.
+
+    Group membership is read from the Cognito-owned group configuration on the
+    event, never from caller metadata, so it is as trusted as the assignment
+    attribute. An unknown group contributes nothing rather than failing, because
+    a pool may hold groups unrelated to Sage.
+    """
+    scopes = subject_grants[0].scopes if subject_grants else frozenset()
+    if not configuration.group_grants:
+        return scopes
+    group_configuration = request.get("groupConfiguration")
+    if group_configuration is None:
+        return scopes
+    groups = _mapping(group_configuration).get("groupsToOverride")
+    if groups is None:
+        return scopes
+    if isinstance(groups, (str, bytes)) or not isinstance(groups, Sequence):
+        _reject()
+    for group in groups:
+        if not _non_empty(group):
+            _reject()
+        scopes |= configuration.group_grants.get(group, frozenset())
+    return scopes
+
+
+def _group_grants(value: object) -> Mapping[str, frozenset[str]]:
+    """Read the optional group-name to Sage-scope map."""
+    if value is None:
+        return MappingProxyType({})
+    mapping = _string_mapping(value, "groupGrants")
+    return MappingProxyType(
+        {
+            group: _string_set(scopes, f"groupGrants[{group}]")
+            for group, scopes in mapping.items()
+        }
+    )
 
 
 def _string_mapping(value: object, field: str) -> Mapping[str, object]:

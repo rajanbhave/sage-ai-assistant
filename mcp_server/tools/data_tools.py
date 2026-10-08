@@ -3,7 +3,7 @@
 These tools return tenant-scoped business data only through the configured
 shared Sage API. Every tool derives request identity from the Runtime-validated
 access token and trusted hosting-lane configuration, then forwards only the
-exact received bearer and unchanged correlation ID.
+exact received bearer and supplied or locally generated correlation ID.
 
 Tool descriptions are crafted for AgentCore Gateway semantic routing
 accuracy.
@@ -96,11 +96,10 @@ def _get_request(headers: dict) -> _ValidatedRequest:
     correlation_id = CorrelationId.new()
     try:
         correlation_values = header_values(headers, CORRELATION_HEADER)
-        if len(correlation_values) != 1 or not isinstance(
-            correlation_values[0], str
-        ):
-            raise ValueError("exactly one correlation header is required")
-        correlation_id = CorrelationId(correlation_values[0])
+        if correlation_values:
+            if len(correlation_values) != 1 or not isinstance(correlation_values[0], str):
+                raise ValueError("at most one correlation header is allowed")
+            correlation_id = CorrelationId(correlation_values[0])
         authorization_values = header_values(headers, AUTHORIZATION_HEADER)
         bearer = parse_bearer_authorization(authorization_values, correlation_id)
         identity = establish_request_identity(

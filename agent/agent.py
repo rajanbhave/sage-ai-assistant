@@ -246,13 +246,31 @@ def _build_model_input(payload: Mapping[str, object], correlation_id: Correlatio
     return prompt
 
 
+_STREAM_EVENT_KEYS = ("data", "current_tool_use", "delta", "message", "event")
+
+
 def _serialize_stream_event(
     event: object, correlation_id: CorrelationId
 ) -> dict[str, object]:
+    """Project one Strands event onto the safe client contract, then sanitize.
+
+    Strands attaches internal objects to every streamed event (``agent``,
+    ``event_loop_cycle_id``, ``event_loop_cycle_trace``, ``event_loop_cycle_span``,
+    ``request_state``). None of them belong on the wire, and the strict field
+    sanitizer rejects them outright, so they are dropped here rather than
+    aborting the invocation. Only the keys the client actually renders survive,
+    plus the terminal ``stop_reason``.
+    """
     if not isinstance(event, Mapping):
         raise IdentityError(IdentityErrorCode.REQUEST_FAILED, correlation_id)
+    projected: dict[str, object] = {
+        key: event[key] for key in _STREAM_EVENT_KEYS if key in event
+    }
+    stop_reason = getattr(event.get("result"), "stop_reason", None)
+    if isinstance(stop_reason, str):
+        projected["result"] = {"stop_reason": stop_reason}
     try:
-        return cast(dict[str, object], serialize_safe_fields(event))
+        return cast(dict[str, object], serialize_safe_fields(projected))
     except (TypeError, ValueError) as error:
         raise IdentityError(IdentityErrorCode.REQUEST_FAILED, correlation_id) from error
 
@@ -301,7 +319,9 @@ async def invoke(payload: dict, context: RequestContext):
                 tools=tools,
             )
             async for event in agent.stream_async(user_message):
-                yield _serialize_stream_event(event, correlation_id)
+                serialized = _serialize_stream_event(event, correlation_id)
+                if serialized:
+                    yield serialized
     except IdentityError as error:
         _log_invocation_failure(error)
         yield serialize_identity_error(error)
