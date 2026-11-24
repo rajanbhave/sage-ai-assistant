@@ -48,7 +48,7 @@ sage-ai-assistant/
 ## Naming rules
 
 - Architecture route names are explanation terms only. Do not encode them in package names, identifiers, environment variables, log fields, config keys, or test filenames.
-- Internal tenant identifiers remain exactly `Tenant_A` and `Tenant_B`; AXA and Allianz are display-only names.
+- Internal tenant identifiers remain exactly `Tenant_A` and `Tenant_B`; Bluepine and Oakhaven are display-only names.
 - Deploy scripts are named `deploy_<component>.*`; identity render/planning helpers use responsibility-based names.
 - Skills live in `skills/<name>/SKILL.md`; data tools use `get_*` names.
 

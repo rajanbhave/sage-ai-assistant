@@ -71,7 +71,24 @@ def _load_base_prompt() -> str:
     return _PROMPT_PATH.read_text(encoding="utf-8").strip()
 
 
-model = BedrockModel(
+# Set per runtime by deployment (one runtime per tenant lane), never taken from the request.
+TENANT_LABEL = os.environ.get("SAGE_TENANT_LABEL", "")
+
+
+class TenantTaggedBedrockModel(BedrockModel):
+    """Stamps the lane's tenant onto every Converse request as Bedrock requestMetadata.
+
+    Cost tools such as DoiT Attribute read it from the request body to attribute tokens per tenant.
+    """
+
+    def format_request(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        request = super().format_request(*args, **kwargs)
+        if TENANT_LABEL:
+            request["requestMetadata"] = {"x-tenant-id": TENANT_LABEL}
+        return request
+
+
+model = TenantTaggedBedrockModel(
     model_id="us.anthropic.claude-sonnet-4-6",
     region_name="us-east-1",
 )
@@ -149,7 +166,18 @@ if not SKILL_REGISTRY_ID:
         "then set SKILL_REGISTRY_ID to the registry ID."
     )
 
-_skills = _fetch_skills_from_registry(SKILL_REGISTRY_ID)
+def _load_bundled_skills() -> list[Skill]:
+    """The same skills/*/SKILL.md files that deploy_registry.py publishes to the registry."""
+    skills_dir = Path(__file__).parent.parent / "skills"
+    return [Skill.from_content(p.read_text(encoding="utf-8")) for p in sorted(skills_dir.glob("*/SKILL.md"))]
+
+
+try:
+    _skills = _fetch_skills_from_registry(SKILL_REGISTRY_ID)
+except Exception as error:  # noqa: BLE001 - startup must not fail on the registry alone
+    # On AgentCore Runtime Instances the registry call is denied at startup despite the role allowing it.
+    logger.warning("Registry %s unavailable (%s); using bundled skills", SKILL_REGISTRY_ID, error)
+    _skills = _load_bundled_skills()
 logger.info("AgentSkills plugin initialized with %d skills from registry", len(_skills))
 _skills_plugin = AgentSkills(skills=cast(Any, _skills))
 

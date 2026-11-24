@@ -12,8 +12,8 @@ interface LoginScreenProps {
 }
 
 const LANES = [
-  { value: "Tenant_A", label: TENANT_DISPLAY_NAMES.Tenant_A, defaultUser: "axa-user" },
-  { value: "Tenant_B", label: TENANT_DISPLAY_NAMES.Tenant_B, defaultUser: "allianz-user" },
+  { value: "Tenant_A", label: TENANT_DISPLAY_NAMES.Tenant_A, defaultUser: "bluepine-user" },
+  { value: "Tenant_B", label: TENANT_DISPLAY_NAMES.Tenant_B, defaultUser: "oakhaven-user" },
 ] as const satisfies readonly {
   value: LaneId;
   label: string;
@@ -22,7 +22,7 @@ const LANES = [
 
 export function LoginScreen({ onLogin }: LoginScreenProps) {
   const [laneId, setLaneId] = useState<LaneId>("Tenant_A");
-  const [username, setUsername] = useState("axa-user");
+  const [username, setUsername] = useState("bluepine-user");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -123,8 +123,8 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
         </form>
 
         <p className="text-xs text-center text-muted-foreground">
-          Demo users: <span className="font-mono">axa-user</span> or{" "}
-          <span className="font-mono">allianz-user</span>. Obtain passwords through the approved secret-sharing channel.
+          Demo users: <span className="font-mono">bluepine-user</span> or{" "}
+          <span className="font-mono">oakhaven-user</span>. Obtain passwords through the approved secret-sharing channel.
         </p>
       </div>
     </div>

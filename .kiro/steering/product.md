@@ -11,7 +11,7 @@ Sage is a two-tenant insurance assistant. It combines a minimal base prompt, Age
 - Domain knowledge lives in `skills/*/SKILL.md`, not in the base prompt or data tools.
 - The Strands `AgentSkills` plugin loads approved skills from AgentCore Registry on demand.
 - MCP tools describe and request business data; they never access the datastore directly.
-- Tenant_A and Tenant_B are security identifiers. AXA and Allianz are display names only.
+- Tenant_A and Tenant_B are security identifiers. Bluepine and Oakhaven are display names only.
 - The original Cognito user access token is preserved end to end; no replacement credential is minted or acquired.
 - AgentCore managed authorizers validate each tenant lane before application code runs.
 - The shared Sage API independently validates both issuers and remains the final business-authorization and tenant-isolation boundary.

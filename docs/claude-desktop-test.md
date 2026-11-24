@@ -14,7 +14,7 @@ from Cognito's OAuth response.
 - [x] Render and review the necessary Cognito changes, then apply them.
 - [x] Add the native remote connector in Claude Desktop and sign in, confirmed
   by the user's successful tool-call report.
-- [x] Invoke product and claim tools for AXA through the native connector,
+- [x] Invoke product and claim tools for Bluepine through the native connector,
   confirmed by the user.
 - [ ] Record the exact Claude version and a dedicated allowlisted native OAuth
   token-type capture; scripted access/ID-token behavior is already verified.
@@ -38,12 +38,12 @@ Tenant_A connection details from repository deployment configuration:
 
 | Setting | Value |
 | --- | --- |
-| Connector name | Sage MCP - AXA |
+| Connector name | Sage MCP - Bluepine |
 | Direct MCP URL | `https://bedrock-agentcore.us-east-1.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-east-1%3A434801484416%3Aruntime%2Fsage_mcp_tenant_a-eSX4mQEcRb/invocations?qualifier=DEFAULT` |
 | Target-specific MCP URL | `https://sage-gw-tenant-a-d3xlgrubpv.gateway.bedrock-agentcore.us-east-1.amazonaws.com/sage-mcp-tenant-a/invocations` |
 | Cognito pool | `us-east-1_72f3bUHBE` |
 | Existing public client ID | `7gl3vm6r1kjmu8bb1o4o3279tn` |
-| Tenant login username | `axa-user` |
+| Tenant login username | `bluepine-user` |
 | Claude callback | `https://claude.ai/api/mcp/auth_callback` |
 
 Live unauthenticated checks:
@@ -141,8 +141,8 @@ than try to fetch that missing archive.
 
 Live scripted verification is recorded in `claude-mcp-correlation-after.json`.
 That dated snapshot predates the user's successful native Claude retry. The
-user subsequently reported clean AXA product and claim calls, including
-AXA Drive Protect (AXA-MOT-001). This is functional success; complete audience
+user subsequently reported clean Bluepine product and claim calls, including
+Bluepine DriveSafe (BLP-MOT-001). This is functional success; complete audience
 binding, separate downstream credentials and native OAuth metadata compliance
 remain to be demonstrated. Current design findings and outstanding tests are
 recorded in [Emil authentication options](emil-authentication-options.md).

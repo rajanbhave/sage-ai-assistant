@@ -11,7 +11,7 @@ The system is built on three pillars:
 
 The frontend is a custom React application using Tailwind CSS and shadcn components that communicates directly with the Strands agent via streamable HTTP (SSE). This follows the [FAST (Fullstack AgentCore Solution Template)](https://github.com/awslabs/fullstack-solution-template-for-agentcore) pattern — the frontend reads SSE events from the `/invocations` endpoint and uses a Strands-specific parser to extract text chunks, tool activity, and lifecycle events. No intermediate protocol layer (AG-UI, CopilotKit) is needed.
 
-Two demo tenants (AXA and Allianz) share domain skills but have isolated mock data, demonstrating multi-tenant isolation end-to-end.
+Two demo tenants (Bluepine and Oakhaven) share domain skills but have isolated mock data, demonstrating multi-tenant isolation end-to-end.
 
 ### Key Design Decisions
 
@@ -78,8 +78,8 @@ graph TB
     end
 
     subgraph Mock Data
-        MD1[AXA Products & Claims]
-        MD2[Allianz Products & Claims]
+        MD1[Bluepine Products & Claims]
+        MD2[Oakhaven Products & Claims]
     end
 
     FM[Claude 3.5 Sonnet v2<br/>Amazon Bedrock]
@@ -126,7 +126,7 @@ sequenceDiagram
     participant Skills as Skill Files
     participant MockData as Mock Data Store
 
-    User->>LoginUI: Select tenant (AXA) + enter credentials
+    User->>LoginUI: Select tenant (Bluepine) + enter credentials
     LoginUI->>Cognito: USER_PASSWORD_AUTH (sage-tenant-a-client)
     Cognito-->>LoginUI: ID token (custom:tenant_id = "Tenant_A")
     LoginUI->>ChatUI: Session established (idToken, tenantId)
@@ -150,8 +150,8 @@ sequenceDiagram
     Agent->>Bedrock: Send [system + user + domain_context]
     Bedrock->>Agent: Tool use request for get_product_info(product_type="motor")
     Agent->>MCP: invoke get_product_info(product_type="motor")\nX-...-Tenant-Id: Tenant_A
-    MCP->>MockData: Filter AXA motor products
-    MockData-->>MCP: AXA motor product data
+    MCP->>MockData: Filter Bluepine motor products
+    MockData-->>MCP: Bluepine motor product data
     MCP-->>Agent: Product info JSON
     Agent->>Bedrock: Send [full context + product data]
     Bedrock-->>Agent: Final response (streamed)
@@ -491,11 +491,11 @@ MOCK_DATA = {
     "Tenant_A": {
         "products": {
             "motor": {
-                "name": "AXA Motor Insurance",
+                "name": "Bluepine Motor Insurance",
                 "base_premium": 450.00,
                 "coverage": ["liability", "collision", "comprehensive"],
                 "discounts": ["no_claims_bonus", "multi_policy"],
-                # ... additional AXA-specific fields
+                # ... additional Bluepine-specific fields
             }
         },
         "claims": {
@@ -512,11 +512,11 @@ MOCK_DATA = {
     "Tenant_B": {
         "products": {
             "motor": {
-                "name": "Allianz Motor Protection",
+                "name": "Oakhaven Motor Protection",
                 "base_premium": 520.00,
                 "coverage": ["liability", "collision", "comprehensive", "roadside"],
                 "discounts": ["safe_driver", "annual_payment"],
-                # ... additional Allianz-specific fields
+                # ... additional Oakhaven-specific fields
             }
         },
         "claims": {
@@ -596,7 +596,7 @@ sage-ai-assistant/
 │   └── agent.py               # BedrockAgentCoreApp entrypoint (agent + server combined)
 ├── mcp_server/
 │   ├── server.py               # FastMCP server with all 4 tools
-│   ├── mock_data.py            # Tenant-scoped mock data (AXA, Allianz)
+│   ├── mock_data.py            # Tenant-scoped mock data (Bluepine, Oakhaven)
 │   └── tools/
 │       ├── context_tools.py    # load_claims_workflow_context, load_premium_formulas_context
 │       └── data_tools.py       # get_product_info, get_claim_details
@@ -614,7 +614,7 @@ sage-ai-assistant/
 │   │   ├── components/
 │   │   │   ├── ChatInterface.tsx  # Chat container: message list + input
 │   │   │   ├── ChatMessage.tsx    # Single message: markdown + tool calls
-│   │   │   ├── TenantSelector.tsx # Dropdown for AXA/Allianz
+│   │   │   ├── TenantSelector.tsx # Dropdown for Bluepine/Oakhaven
 │   │   │   └── ToolActivity.tsx   # Inline tool call display (name, input, result)
 │   │   └── lib/
 │   │       └── agentcore-client/  # SSE streaming client (adapted from FAST)
@@ -771,7 +771,7 @@ Chat UI (React) → (JWT Bearer) → AgentCore Runtime → (SigV4 + Tenant Heade
                     ↑                                          ↑
                Cognito User Pool                         Extract tenant_id
                (2 app clients:                           from JWT claims,
-                AXA, Allianz)                            set as custom header
+                Bluepine, Oakhaven)                            set as custom header
 ```
 
 Cognito configuration:
@@ -987,7 +987,7 @@ This feature requires both unit tests and property-based tests for comprehensive
 | Test Area | Examples |
 |-----------|----------|
 | Base prompt validation | Verify prompt matches reference, token count ≤ 200, no domain keywords |
-| Mock data structure | Verify AXA and Allianz have distinct products and claims |
+| Mock data structure | Verify Bluepine and Oakhaven have distinct products and claims |
 | Tool registration | Verify all 4 tools are registered on MCP server |
 | Skill file missing | Invoke context tool with nonexistent file, verify error message |
 | Gateway config | Verify metadataConfiguration includes tenant header |
@@ -1004,7 +1004,7 @@ This feature requires both unit tests and property-based tests for comprehensive
 
 | Test Area | Examples |
 |-----------|----------|
-| Tenant selector rendering | Verify dropdown renders with AXA and Allianz options |
+| Tenant selector rendering | Verify dropdown renders with Bluepine and Oakhaven options |
 | AgentCore Client header injection | Verify invokeAgent() includes tenant header on POST to /invocations |
 | Tool activity display | Verify tool_use_start and tool_result StreamEvents render inline |
 | Loading state | Verify chat shows loading indicator during SSE streaming |
@@ -1015,9 +1015,9 @@ This feature requires both unit tests and property-based tests for comprehensive
 
 | Scenario | Description |
 |----------|-------------|
-| AXA premium query | End-to-end: select AXA → ask premium question → verify context tool + data tool invoked → verify AXA-specific response |
-| Allianz claim query | End-to-end: select Allianz → ask claim status → verify context tool + data tool invoked → verify Allianz-specific response |
-| Cross-tenant isolation | Select AXA → query Allianz claim ID → verify "not found" response |
+| Bluepine premium query | End-to-end: select Bluepine → ask premium question → verify context tool + data tool invoked → verify Bluepine-specific response |
+| Oakhaven claim query | End-to-end: select Oakhaven → ask claim status → verify context tool + data tool invoked → verify Oakhaven-specific response |
+| Cross-tenant isolation | Select Bluepine → query Oakhaven claim ID → verify "not found" response |
 | No tool match | Ask off-domain question → verify agent responds with base prompt only |
 
 ## Implementation Decisions & Lessons Learnt

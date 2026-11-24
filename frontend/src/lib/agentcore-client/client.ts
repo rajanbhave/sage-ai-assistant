@@ -155,6 +155,8 @@ export async function invokeAgent(
         "Content-Type": "application/json",
         Authorization: buildAuthorizationHeader(auth.accessToken),
         [CORRELATION_HEADER]: binding.correlationId,
+        // Without it AgentCore starts a new session per request; on Instances that boots a new EC2.
+        "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": binding.sessionId,
       },
       body: JSON.stringify({ prompt: query }),
       signal,

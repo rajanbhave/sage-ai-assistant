@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Sage on AgentCore Runtime Instances with the DoiT Attribute EC2 sensor.
+  VPC with NAT, capacity provider roles, and the sensor installer (EventBridge to Lambda to SSM).
+  Capacity providers and agent runtimes are created by deploy_instances.py (no CloudFormation resource yet).
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: sage-inst
+  SensorTokenSecretName:
+    Type: String
+    Default: sage-reinvent/attribute-sensor-token
+    Description: 'Secrets Manager secret holding {"token": "..."}. Read on the instance, never passed through SSM.'
+  SensorMemoryLimitBytes:
+    Type: String
+    Default: "524288000"
+
+Resources:
+  # ---------------------------------------------------------------- network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags: [{ Key: Name, Value: !Ref NamePrefix }]
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: { VpcId: !Ref Vpc, InternetGatewayId: !Ref Igw }
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${NamePrefix}-public" }]
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${NamePrefix}-private-a" }]
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.42.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${NamePrefix}-private-b" }]
+
+  PublicRt:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  PublicDefault:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties: { RouteTableId: !Ref PublicRt, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref Igw }
+  PublicAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet, RouteTableId: !Ref PublicRt }
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttach
+    Properties: { Domain: vpc }
+  Nat:
+    Type: AWS::EC2::NatGateway
+    Properties: { SubnetId: !Ref PublicSubnet, AllocationId: !GetAtt NatEip.AllocationId }
+
+  PrivateRt:
+    Type: AWS::EC2::RouteTable
+    Properties: { VpcId: !Ref Vpc }
+  PrivateDefault:
+    Type: AWS::EC2::Route
+    Properties: { RouteTableId: !Ref PrivateRt, DestinationCidrBlock: 0.0.0.0/0, NatGatewayId: !Ref Nat }
+  PrivateAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnetA, RouteTableId: !Ref PrivateRt }
+  PrivateAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnetB, RouteTableId: !Ref PrivateRt }
+
+  InstanceSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: AgentCore Instances for Sage - egress only
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 0.0.0.0/0 }
+
+  # ------------------------------------------------------------------- IAM
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Effect: Allow, Principal: { Service: ec2.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: read-sensor-token
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SensorTokenSecretName}-*"
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: { Roles: [!Ref InstanceRole] }
+
+  # Permissions mirror doitintl/attribute-agent-core (known working); PassRole narrowed to the instance role.
+  OperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Effect: Allow, Principal: { Service: bedrock-agentcore.amazonaws.com }, Action: sts:AssumeRole }
+      Policies:
+        - PolicyName: capacity-provider-operator
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: ["ec2:*", "autoscaling:*", "sns:*", "sqs:*"], Resource: "*" }
+              - Effect: Allow
+                Action: [events:PutRule, events:DeleteRule, events:DescribeRule, events:EnableRule, events:DisableRule, events:PutTargets, events:RemoveTargets, events:ListTargetsByRule]
+                Resource: "*"
+              - { Effect: Allow, Action: iam:PassRole, Resource: !GetAtt InstanceRole.Arn }
+              - { Effect: Allow, Action: iam:CreateServiceLinkedRole, Resource: "*" }
+
+  InstallerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - { Effect: Allow, Principal: { Service: lambda.amazonaws.com }, Action: sts:AssumeRole }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: sensor-installer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - { Effect: Allow, Action: [ec2:DescribeInstances, ssm:DescribeInstanceInformation, ssm:ListCommands], Resource: "*" }
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript"
+                  - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+
+  # Code artifacts for the Instances runtimes. The starter toolkit's bucket expires every object after
+  # 7 days, which would remove the zip before the 3 Dec talk. Emptied and deleted at teardown.
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  # ------------------------------------------------------ sensor installer
+  SensorInstaller:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${NamePrefix}-sensor-installer"
+      Runtime: python3.13
+      Handler: sensor_installer.handler
+      Timeout: 120
+      Role: !GetAtt InstallerRole.Arn
+      Environment:
+        Variables:
+          # {"<capacityProviderId>": "<workload name>"}; set by deploy_instances.py
+          WORKLOAD_MAP: "{}"
+          SECRET_NAME: !Ref SensorTokenSecretName
+          MEMORY_LIMIT: !Ref SensorMemoryLimitBytes
+      Code:
+        # Placeholder. deploy_instances.py uploads sensor_installer.py with a current boto3
+        # (IncludeManagedResources); a later stack update would revert to this stub.
+        ZipFile: |
+          def handler(event, context):
+              raise RuntimeError("run infra/instances/deploy_instances.py to deploy the installer code")
+
+  InstanceRunningRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Poll for new AgentCore instances and install the Attribute sensor
+      ScheduleExpression: rate(1 minute)
+      Targets:
+        - { Id: sensor-installer, Arn: !GetAtt SensorInstaller.Arn }
+  InstallerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SensorInstaller
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InstanceRunningRule.Arn
+
+Outputs:
+  SubnetIds: { Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]] }
+  SecurityGroupId: { Value: !Ref InstanceSg }
+  InstanceProfileArn: { Value: !GetAtt InstanceProfile.Arn }
+  OperatorRoleArn: { Value: !GetAtt OperatorRole.Arn }
+  SensorInstallerName: { Value: !Ref SensorInstaller }
+  ArtifactBucketName: { Value: !Ref ArtifactBucket }

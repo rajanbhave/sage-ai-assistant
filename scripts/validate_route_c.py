@@ -79,8 +79,8 @@ CREDENTIAL_PATTERNS = (
     "id_token",
 )
 EXPECTED_TOOLS = frozenset({"get_product_info", "get_claim_details"})
-EXPECTED_PRODUCT = {"Tenant_A": "AXA Drive Protect", "Tenant_B": "Allianz AutoGuard Plus"}
-FOREIGN_PRODUCT = {"Tenant_A": "Allianz", "Tenant_B": "AXA"}
+EXPECTED_PRODUCT = {"Tenant_A": "Bluepine DriveSafe", "Tenant_B": "Oakhaven AutoShield Plus"}
+FOREIGN_PRODUCT = {"Tenant_A": "Oakhaven", "Tenant_B": "Bluepine"}
 SHARED_CLAIM = "CLM-12345"
 EXPECTED_CLAIM_AMOUNT = {"Tenant_A": 3200.0, "Tenant_B": 9700.0}
 REJECT_STATUSES = frozenset({401, 403})

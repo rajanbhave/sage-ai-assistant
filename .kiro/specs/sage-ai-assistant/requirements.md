@@ -8,7 +8,7 @@ The system comprises three layers: (1) context tools that load domain knowledge 
 
 ### Demo Scope
 
-This is an end-to-end demo showcasing the full flow from UI to AgentCore modules for two tenants: **AXA** and **Allianz**.
+This is an end-to-end demo showcasing the full flow from UI to AgentCore modules for two tenants: **Bluepine** and **Oakhaven**.
 
 - **Frontend**: React chat interface — login screen (Phase 2, active) or tenant selector dropdown (Phase 1 fallback).
 - **Agent SDK**: Strands SDK for building the Sage agent with tool use capabilities.
@@ -16,7 +16,7 @@ This is an end-to-end demo showcasing the full flow from UI to AgentCore modules
 - **Context Modules (shared across tenants)**: 2 context tools deployed in the MCP server that load skill Markdown as additional prompt context (similar to Claude Code skills). The AgentCore Gateway semantically routes queries to these tools:
   1. `load_claims_workflow_context` — Claims processing domain knowledge
   2. `load_premium_formulas_context` — Premium calculation formulas and rules
-- **Data Tools (tenant-scoped)**: 2 data tools deployed in the same MCP server with mock data for AXA and Allianz:
+- **Data Tools (tenant-scoped)**: 2 data tools deployed in the same MCP server with mock data for Bluepine and Oakhaven:
   1. `get_product_info` — Returns tenant-specific product/policy details
   2. `get_claim_details` — Returns tenant-specific claim information
 - **MCP Server Framework**: FastMCP (Python) for defining the MCP server with decorator-based tool registration.
@@ -34,12 +34,12 @@ This is an end-to-end demo showcasing the full flow from UI to AgentCore modules
 
 | Tenant | User Query | Expected Flow |
 |--------|-----------|---------------|
-| AXA | "How is the premium calculated for a motor policy?" | → `load_premium_formulas_context` (appends domain context) → `get_product_info` (returns AXA motor product details) |
-| Allianz | "How is the premium calculated for a motor policy?" | → `load_premium_formulas_context` (appends domain context) → `get_product_info` (returns Allianz motor product details) |
-| AXA | "What's the status of claim CLM-12345?" | → `load_claims_workflow_context` (appends domain context) → `get_claim_details` (returns AXA claim CLM-12345) |
-| Allianz | "What's the status of claim CLM-5454?" | → `load_claims_workflow_context` (appends domain context) → `get_claim_details` (returns Allianz claim CLM-5454) |
-| AXA | "What motor products do you offer and how is the premium worked out?" | → `load_premium_formulas_context` (appends premium calculation rules) → `get_product_info` (returns AXA Drive Protect details with base premium) |
-| Allianz | "Walk me through how my claim CLM-5454 is being processed" | → `load_claims_workflow_context` (appends claims workflow domain knowledge) → `get_claim_details` (returns Allianz CLM-5454 status and details) |
+| Bluepine | "How is the premium calculated for a motor policy?" | → `load_premium_formulas_context` (appends domain context) → `get_product_info` (returns Bluepine motor product details) |
+| Oakhaven | "How is the premium calculated for a motor policy?" | → `load_premium_formulas_context` (appends domain context) → `get_product_info` (returns Oakhaven motor product details) |
+| Bluepine | "What's the status of claim CLM-12345?" | → `load_claims_workflow_context` (appends domain context) → `get_claim_details` (returns Bluepine claim CLM-12345) |
+| Oakhaven | "What's the status of claim CLM-5454?" | → `load_claims_workflow_context` (appends domain context) → `get_claim_details` (returns Oakhaven claim CLM-5454) |
+| Bluepine | "What motor products do you offer and how is the premium worked out?" | → `load_premium_formulas_context` (appends premium calculation rules) → `get_product_info` (returns Bluepine DriveSafe details with base premium) |
+| Oakhaven | "Walk me through how my claim CLM-5454 is being processed" | → `load_claims_workflow_context` (appends claims workflow domain knowledge) → `get_claim_details` (returns Oakhaven CLM-5454 status and details) |
 
 ## Glossary
 
@@ -47,7 +47,7 @@ This is an end-to-end demo showcasing the full flow from UI to AgentCore modules
 - **Base_Prompt**: The minimal system prompt (not exceeding 200 tokens) that defines Sage's personality and behavioral rules without any domain-specific knowledge.
 - **AgentCore_Gateway**: The runtime routing component that performs semantic search (`x_amz_bedrock_agentcore_search`) over all registered tools to match user queries to relevant context and data tools.
 - **Context_Tool**: A tool prefixed with `load_*` that loads domain-specific instructions from a corresponding Markdown skill file. The demo includes two context tools: `load_claims_workflow_context` and `load_premium_formulas_context`.
-- **Data_Tool**: A tool that retrieves tenant-scoped data from backend systems. The demo includes two data tools: `get_product_info` and `get_claim_details`, backed by mock data for AXA and Allianz tenants.
+- **Data_Tool**: A tool that retrieves tenant-scoped data from backend systems. The demo includes two data tools: `get_product_info` and `get_claim_details`, backed by mock data for Bluepine and Oakhaven tenants.
 - **Skill**: A Markdown file stored in the `skills/` directory containing domain knowledge for a specific feature area (e.g., premium formulas, claims workflow).
 - **Semantic_Search**: The gateway's mechanism for matching a user query against tool descriptions to determine which tools to invoke.
 - **MCP_Server**: The Model Context Protocol server built with FastMCP (Python) that hosts all tools on AgentCore runtime and exposes them to the gateway.
@@ -153,19 +153,19 @@ For responses:
 #### Demo Tenants
 
 The demo showcases two tenants with mock data:
-- **AXA**: Motor products, claims (e.g., CLM-12345)
-- **Allianz**: Motor products, claims (e.g., CLM-5454)
+- **Bluepine**: Motor products, claims (e.g., CLM-12345)
+- **Oakhaven**: Motor products, claims (e.g., CLM-5454)
 
 #### Acceptance Criteria
 
-1. THE React frontend SHALL provide a login screen (Phase 2) or tenant selector dropdown (Phase 1 fallback) allowing the user to establish their tenant identity (AXA or Allianz) at session start.
+1. THE React frontend SHALL provide a login screen (Phase 2) or tenant selector dropdown (Phase 1 fallback) allowing the user to establish their tenant identity (Bluepine or Oakhaven) at session start.
 2. THE React frontend SHALL send the selected tenant identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` HTTP header with each request.
 3. THE Sage_Agent SHALL read the tenant identifier from the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` request header and associate the session with that Tenant.
 4. THE AgentCore_Gateway target SHALL be configured with `metadataConfiguration.allowedRequestHeaders` to propagate the tenant header to the MCP_Server.
 5. WHEN a Data_Tool is invoked, THE Data_Tool SHALL read the tenant identifier from the propagated header and filter results to return only data belonging to that Tenant.
 6. THE Skill files SHALL be shared across all Tenants (skills contain domain knowledge, not tenant-specific data).
-7. WHEN an AXA user queries claim details, THE `get_claim_details` tool SHALL return only AXA claim data.
-8. WHEN an Allianz user queries claim details, THE `get_claim_details` tool SHALL return only Allianz claim data.
+7. WHEN an Bluepine user queries claim details, THE `get_claim_details` tool SHALL return only Bluepine claim data.
+8. WHEN an Oakhaven user queries claim details, THE `get_claim_details` tool SHALL return only Oakhaven claim data.
 9. THE mock data SHALL include distinct product configurations and claim records for each Tenant to visually demonstrate isolation during the demo.
 
 ### Requirement 8: Tool Description Quality for Routing Accuracy
@@ -188,7 +188,7 @@ The demo showcases two tenants with mock data:
 1. THE Sage_Agent SHALL support two Data_Tools: `get_product_info` and `get_claim_details`.
 2. THE `get_product_info` tool SHALL accept a product type parameter and read the tenant identifier from the propagated request header, returning tenant-specific product configuration from mock data.
 3. THE `get_claim_details` tool SHALL accept a claim reference parameter and read the tenant identifier from the propagated request header, returning tenant-specific claim details from mock data.
-4. THE mock data SHALL include distinct records for AXA and Allianz tenants (different product configurations, different claim numbers and statuses).
+4. THE mock data SHALL include distinct records for Bluepine and Oakhaven tenants (different product configurations, different claim numbers and statuses).
 5. IF a Data_Tool is invoked with a claim reference that does not belong to the associated Tenant, THEN THE Data_Tool SHALL return a "not found" response.
 6. WHEN a Data_Tool returns results, THE Sage_Agent SHALL incorporate the returned data into the response to the user.
 
@@ -199,7 +199,7 @@ The demo showcases two tenants with mock data:
 #### Acceptance Criteria
 
 1. THE demo SHALL provide a chat frontend built with React + Vite + Tailwind CSS + shadcn/ui.
-2. THE React frontend SHALL include a tenant selector dropdown with options for AXA and Allianz.
+2. THE React frontend SHALL include a tenant selector dropdown with options for Bluepine and Oakhaven.
 3. THE React frontend SHALL pass the selected tenant identifier as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` HTTP header with each request (Phase 1), or include it in the JWT token claims (Phase 2).
 4. THE React frontend SHALL send user messages to the Sage_Agent backend and display streamed responses.
 5. THE React frontend SHALL visually indicate when the Sage_Agent is processing a query (loading state).
@@ -234,8 +234,8 @@ The demo showcases two tenants with mock data:
 
 #### Phase 2: JWT Tenant Authentication (Active)
 
-1. THE AgentCore Runtime (agent) inbound auth SHALL accept Cognito ID tokens from the tenant user pool (`sage-tenant-pool`). The JWT authorizer SHALL use `allowedAudience` with the AXA and Allianz app client IDs — ID tokens carry `aud` = client ID.
+1. THE AgentCore Runtime (agent) inbound auth SHALL accept Cognito ID tokens from the tenant user pool (`sage-tenant-pool`). The JWT authorizer SHALL use `allowedAudience` with the Bluepine and Oakhaven app client IDs — ID tokens carry `aud` = client ID.
 2. THE React frontend SHALL authenticate users against the tenant-specific Cognito app client (`sage-tenant-a-client` or `sage-tenant-b-client`) using `USER_PASSWORD_AUTH` via `amazon-cognito-identity-js`, obtain an ID token containing `custom:tenant_id`, and send it via the `Authorization: Bearer` header on every `/invocations` request.
 3. THE Sage_Agent SHALL extract the tenant identifier from the JWT `custom:tenant_id` claim (base64-decoded payload, no signature verification needed — runtime already validated) and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation. Phase 1 direct-header fallback is retained for compatibility.
-4. THE tenant user pool SHALL be deployed via `scripts/deploy_user_pool.py`, which creates the pool, two app clients (one per tenant), and demo users (`axa-user`, `allianz-user`) with permanent passwords and `custom:tenant_id` attributes.
+4. THE tenant user pool SHALL be deployed via `scripts/deploy_user_pool.py`, which creates the pool, two app clients (one per tenant), and demo users (`bluepine-user`, `oakhaven-user`) with permanent passwords and `custom:tenant_id` attributes.
 5. THE Sage_Agent SHALL integrate Amazon Bedrock Guardrails for out-of-domain query handling, replacing the base prompt's static instruction with a managed guardrail policy.

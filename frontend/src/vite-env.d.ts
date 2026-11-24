@@ -9,6 +9,9 @@ interface ImportMetaEnv {
   readonly VITE_TENANT_B_ISSUER?: string;
   readonly VITE_TENANT_A_AGENT_RUNTIME_ENDPOINT?: string;
   readonly VITE_TENANT_B_AGENT_RUNTIME_ENDPOINT?: string;
+  /** Optional: fixed runtime session per lane (AgentCore Instances boot one EC2 per session). */
+  readonly VITE_TENANT_A_RUNTIME_SESSION_ID?: string;
+  readonly VITE_TENANT_B_RUNTIME_SESSION_ID?: string;
   /** Enables the demo stage and its deliberate cross-lane rejection probe. */
   readonly VITE_DEMO_STAGE?: string;
   /** Optional: region used to build CloudWatch evidence links. */

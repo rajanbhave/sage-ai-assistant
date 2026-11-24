@@ -23,7 +23,7 @@ echoed, or written to output.
 Usage:
   uv run python scripts/bootstrap_tenant_pool.py create --lane Tenant_A --render
   TENANT_A_DEMO_PASSWORD=... uv run python scripts/bootstrap_tenant_pool.py \
-      create --lane Tenant_A --username axa-user --confirm
+      create --lane Tenant_A --username bluepine-user --confirm
   uv run python scripts/bootstrap_tenant_pool.py attach-trigger --lane Tenant_A \
       --lambda-arn <alias-arn> --confirm
 """

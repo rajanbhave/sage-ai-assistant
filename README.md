@@ -1,6 +1,6 @@
 # Sage AI Assistant
 
-Sage is a two-tenant insurance assistant built on Amazon Bedrock AgentCore. Tenant_A and Tenant_B are internal security identifiers; AXA and Allianz are display names only.
+Sage is a two-tenant insurance assistant built on Amazon Bedrock AgentCore. Tenant_A and Tenant_B are internal security identifiers; Bluepine and Oakhaven are display names only.
 
 ## Architecture
 
@@ -52,7 +52,7 @@ tests/                         Focused backend tests
 
 - Skills: `claims-workflow`, `premium-formulas`
 - MCP tools: `get_product_info`, `get_claim_details`
-- Demo display names: AXA for Tenant_A, Allianz for Tenant_B
+- Demo display names: Bluepine for Tenant_A, Oakhaven for Tenant_B
 - Data source: `sage_api/mock_data.py`, reachable only through the Sage API
 
 ## Local development
@@ -92,7 +92,7 @@ customizer configuration can name them, and the customizer must be an active
 ```bash
 # Per lane (Tenant_A shown; repeat for Tenant_B)
 TENANT_A_DEMO_PASSWORD=... uv run python scripts/bootstrap_tenant_pool.py \
-  create --lane Tenant_A --username axa-user --confirm
+  create --lane Tenant_A --username bluepine-user --confirm
 
 uv run python scripts/deploy_pre_token_lambda.py --lane Tenant_A \
   --user-pool-id <from bootstrap> --client-id <from bootstrap> \

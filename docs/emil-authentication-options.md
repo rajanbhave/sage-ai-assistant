@@ -302,8 +302,8 @@ model and its enforcement responsibilities.
 
 ## Current-config Sage result
 
-The user reported successful native Claude connector calls for AXA product and
-claim tools, including AXA Drive Protect (AXA-MOT-001). Separate scripted checks
+The user reported successful native Claude connector calls for Bluepine product and
+claim tools, including Bluepine DriveSafe (BLP-MOT-001). Separate scripted checks
 passed direct access-token calls, denied ID and wrong-tenant tokens, and verified
 Gateway/Agent behavior after the correlation-header fix. This establishes
 functional Sage access-token compatibility, not Emil API compatibility.

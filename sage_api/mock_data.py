@@ -8,8 +8,8 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
     "Tenant_A": {
         "products": [
             {
-                "product_id": "AXA-MOT-001",
-                "name": "AXA Drive Protect",
+                "product_id": "BLP-MOT-001",
+                "name": "Bluepine DriveSafe",
                 "type": "motor",
                 "base_premium": 850.00,
                 "coverage": {
@@ -29,7 +29,7 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
         "claims": [
             {
                 "claim_reference": "CLM-12345",
-                "policy_id": "AXA-MOT-001-POL-9981",
+                "policy_id": "BLP-MOT-001-POL-9981",
                 "status": "approved",
                 "amount": 3_200.00,
                 "currency": "EUR",
@@ -40,7 +40,7 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
             },
             {
                 "claim_reference": "CLM-12346",
-                "policy_id": "AXA-MOT-001-POL-9982",
+                "policy_id": "BLP-MOT-001-POL-9982",
                 "status": "pending_documents",
                 "amount": 1_500.00,
                 "currency": "EUR",
@@ -54,8 +54,8 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
     "Tenant_B": {
         "products": [
             {
-                "product_id": "ALZ-MOT-001",
-                "name": "Allianz AutoGuard Plus",
+                "product_id": "OKH-MOT-001",
+                "name": "Oakhaven AutoShield Plus",
                 "type": "motor",
                 "base_premium": 920.00,
                 "coverage": {
@@ -76,7 +76,7 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
         "claims": [
             {
                 "claim_reference": "CLM-5454",
-                "policy_id": "ALZ-MOT-001-POL-4421",
+                "policy_id": "OKH-MOT-001-POL-4421",
                 "status": "under_review",
                 "amount": 8_750.00,
                 "currency": "EUR",
@@ -87,7 +87,7 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
             },
             {
                 "claim_reference": "CLM-12345",
-                "policy_id": "ALZ-MOT-001-POL-6666",
+                "policy_id": "OKH-MOT-001-POL-6666",
                 "status": "approved",
                 "amount": 9_700.00,
                 "currency": "EUR",
@@ -98,7 +98,7 @@ MOCK_DATA: dict[str, dict[str, list[dict[str, object]]]] = {
             },
             {
                 "claim_reference": "CLM-5455",
-                "policy_id": "ALZ-MOT-001-POL-4422",
+                "policy_id": "OKH-MOT-001-POL-4422",
                 "status": "closed",
                 "amount": 450.00,
                 "currency": "EUR",

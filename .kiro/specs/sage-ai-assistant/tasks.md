@@ -19,7 +19,7 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - [x] 2.2 Create `frontend/src/lib/agentcore-client/` — SSE streaming client adapted from FAST: `types.ts` (StreamEvent, ChunkParser, StreamCallback), `utils/sse.ts` (readSSEStream), `parsers/strands.ts` (parseStrandsChunk), `client.ts` (invokeAgent with tenant header injection)
   - [x] 2.3 Build `frontend/src/components/ChatInterface.tsx` — chat container with message list, input field, streaming state management; calls `invokeAgent()` and accumulates StreamEvents into message segments (interleaved text + tool calls); clears messages/input/streaming state via `useEffect` when `tenantId` changes
   - [x] 2.4 Build `frontend/src/components/ChatMessage.tsx` — renders a single message with markdown formatting and inline tool call components (tool name, streaming input, result)
-  - [x] 2.5 Implement `frontend/src/components/TenantSelector.tsx` — shadcn dropdown with AXA and Allianz options, updates parent state on change
+  - [x] 2.5 Implement `frontend/src/components/TenantSelector.tsx` — shadcn dropdown with Bluepine and Oakhaven options, updates parent state on change
   - [x] 2.6 Implement `frontend/src/components/ToolActivity.tsx` — inline tool call display showing tool name, status (running/complete), and result summary
   - [x] 2.7 Build `frontend/src/App.tsx` — root component: TenantSelector + ChatInterface, passes tenantId to AgentCore Client
   - [x] 2.8 Create `frontend/.env.local` with `VITE_AGENT_URL=http://localhost:8080/invocations` for local development
@@ -52,14 +52,14 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - [x] 5.3 Implement `mcp_server/tools/data_tools.py` — `get_product_info(product_type)` and `get_claim_details(claim_reference)` tools with `@mcp.tool()` decorator, descriptive tool descriptions, tenant header extraction via `CurrentHeaders()` from `fastmcp.dependencies` (not `None` default — FastMCP only injects headers when `CurrentHeaders()` is the default value), data filtering by tenant, and error handling (missing header → "invalid_tenant", unknown tenant → "invalid_tenant", claim not found → "not_found")
   - [x] 5.4 Register data tools in `mcp_server/server.py` — import from `data_tools.py` so all 4 tools are exposed
   - [x] 5.5 Update agent to propagate tenant header — ensure `agent/agent.py` reads the tenant header from the incoming request and forwards it on all tool invocation calls through the gateway
-  - [x] 5.6 Verify locally: select AXA → ask "What motor products do you offer?" → agent invokes `load_premium_formulas_context` then `get_product_info` → returns AXA motor data; switch to Allianz → same query → returns Allianz motor data; query AXA claim CLM-5454 (Allianz claim) → "not found"
+  - [x] 5.6 Verify locally: select Bluepine → ask "What motor products do you offer?" → agent invokes `load_premium_formulas_context` then `get_product_info` → returns Bluepine motor data; switch to Oakhaven → same query → returns Oakhaven motor data; query Bluepine claim CLM-5454 (Oakhaven claim) → "not found"
   - _Requirements: 7.5, 7.6, 7.7, 7.8, 7.9, 8.2, 9.1, 9.2, 9.3, 9.4, 9.5, 11.2, 11.3, 11.5_
 
 - [x] 6. Data tools on AWS
   - [x] 6.1 Redeploy MCP server to AgentCore with all 4 tools using `scripts/deploy_mcp.sh` — MCP server runs on port 8000 (not 8080) with `stateless_http=True` in `mcp.run()`
-  - [x] 6.2 Verify tenant-scoped data on AWS: select AXA → query product → AXA data; select Allianz → same query → Allianz data
-  - [x] 6.3 Verify cross-tenant isolation on AWS: AXA user queries Allianz claim CLM-5454 → "not found"
-  - [x] 6.4 Verify all 4 demo scenarios from requirements: AXA premium query, Allianz premium query, AXA claim CLM-12345, Allianz claim CLM-5454
+  - [x] 6.2 Verify tenant-scoped data on AWS: select Bluepine → query product → Bluepine data; select Oakhaven → same query → Oakhaven data
+  - [x] 6.3 Verify cross-tenant isolation on AWS: Bluepine user queries Oakhaven claim CLM-5454 → "not found"
+  - [x] 6.4 Verify all 4 demo scenarios from requirements: Bluepine premium query, Oakhaven premium query, Bluepine claim CLM-12345, Oakhaven claim CLM-5454
   - _Requirements: 3.3, 4.1, 4.2, 4.3, 4.4, 6.6, 8.3, 8.4, 9.6_
 
 - [x] 7. Phase 2: JWT authentication
@@ -67,7 +67,7 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - [x] 7.2 Configure AgentCore Identity with credential provider for JWT validation from the Cognito User Pool
   - [x] 7.3 Update `agent/agent.py` to extract `tenant_id` from JWT `custom:tenant_id` claim when present, and set it as the `X-Amzn-Bedrock-AgentCore-Runtime-Custom-Tenant-Id` header for gateway propagation (fallback to direct header for Phase 1 compatibility)
   - [x] 7.4 Update React frontend to authenticate against tenant-specific Cognito app client, obtain JWT, and send via `Authorization` header in the AgentCore Client's POST to `/invocations`
-  - [x] 7.5 Verify: login as AXA user → JWT contains `custom:tenant_id: Tenant_A` → agent extracts tenant from JWT → data tools return AXA data; same for Allianz
+  - [x] 7.5 Verify: login as Bluepine user → JWT contains `custom:tenant_id: Tenant_A` → agent extracts tenant from JWT → data tools return Bluepine data; same for Oakhaven
   - _Requirements: 12.Phase2.1, 12.Phase2.2, 12.Phase2.3, 12.Phase2.4_
 
 - [ ] 8. Phase 2: Bedrock Guardrails
@@ -87,6 +87,6 @@ Incremental, feature-sliced build of the Sage AI Assistant. Each task delivers a
   - [ ] 9.8 Backend property test: Property 8 (Skill Tenant Independence) — generate pairs of tenant IDs, invoke same context tool, assert identical output. Tag: `Feature: sage-ai-assistant, Property 8: Skill Tenant Independence`
   - [ ] 9.9 Backend property test: Property 9 (Agent Streaming Response) — generate valid chat requests, assert response is async iterable of valid chunks. Tag: `Feature: sage-ai-assistant, Property 9: Agent Streaming Response`
   - [ ] 9.10 Backend property test: Property 10 (JWT Tenant Claim Extraction) — generate JWT tokens with random tenant claims, assert extracted tenant matches claim. Tag: `Feature: sage-ai-assistant, Property 10: JWT Tenant Claim Extraction`
-  - [ ] 9.11 Backend unit tests: base prompt validation (matches reference, ≤200 tokens, no domain keywords), mock data structure (AXA/Allianz distinct), tool registration (all 4 tools registered), skill file missing error, gateway config validation
-  - [ ] 9.12 Frontend unit tests: tenant selector renders AXA/Allianz options, AgentCore Client `invokeAgent()` includes tenant header on POST, Strands parser correctly handles text/tool_use/tool_result/result events, SSE reader splits lines correctly, tool activity displays inline, loading state during streaming
+  - [ ] 9.11 Backend unit tests: base prompt validation (matches reference, ≤200 tokens, no domain keywords), mock data structure (Bluepine/Oakhaven distinct), tool registration (all 4 tools registered), skill file missing error, gateway config validation
+  - [ ] 9.12 Frontend unit tests: tenant selector renders Bluepine/Oakhaven options, AgentCore Client `invokeAgent()` includes tenant header on POST, Strands parser correctly handles text/tool_use/tool_result/result events, SSE reader splits lines correctly, tool activity displays inline, loading state during streaming
   - _Requirements: All — cross-cutting validation_

@@ -83,10 +83,10 @@ def test_sage_api_http_boundary_validates_and_isolates_reads():
     tenant_a = call(app, authorization=tenant_a_token)
     tenant_b = call(app, source="mcp-b", authorization=tenant_b_token)
     assert tenant_a["status"] == tenant_b["status"] == "200 OK"
-    assert [product["product_id"] for product in tenant_a["body"]["products"]] == ["AXA-MOT-001"]
-    assert [product["product_id"] for product in tenant_b["body"]["products"]] == ["ALZ-MOT-001"]
-    assert tenant_a["body"]["products"][0]["name"] == "AXA Drive Protect"
-    assert tenant_b["body"]["products"][0]["name"] == "Allianz AutoGuard Plus"
+    assert [product["product_id"] for product in tenant_a["body"]["products"]] == ["BLP-MOT-001"]
+    assert [product["product_id"] for product in tenant_b["body"]["products"]] == ["OKH-MOT-001"]
+    assert tenant_a["body"]["products"][0]["name"] == "Bluepine DriveSafe"
+    assert tenant_b["body"]["products"][0]["name"] == "Oakhaven AutoShield Plus"
 
     tenant_a_shared = call(app, path="/claims", query="claim_reference=CLM-12345", authorization=tenant_a_token)
     tenant_b_shared = call(app, path="/claims", query="claim_reference=CLM-12345", source="mcp-b", authorization=tenant_b_token)

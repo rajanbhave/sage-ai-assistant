@@ -104,3 +104,8 @@ scripts/route_c_validation_report.json
 .kiro/specs/multi-tenant-agent-identity/.config.kiro
 .kiro/specs/multi-tenant-agent-identity/task-*.json
 .kiro/specs/multi-tenant-agent-identity/tasks.meta.json
+
+# AgentCore Instances demo outputs (runtime ARNs, account IDs) and traffic logs
+infra/instances/instances_output.json
+infra/instances/traffic_log.jsonl
+infra/instances/traffic_stdout.log

@@ -9,8 +9,8 @@ import { AuthenticationArtifact } from "./artifact";
 export type LaneId = "Tenant_A" | "Tenant_B";
 
 export const TENANT_DISPLAY_NAMES = {
-  Tenant_A: "AXA",
-  Tenant_B: "Allianz",
+  Tenant_A: "Bluepine",
+  Tenant_B: "Oakhaven",
 } as const satisfies Record<LaneId, string>;
 
 export interface TrustedLaneRecord {
@@ -84,6 +84,15 @@ const TRUSTED_LANES = Object.freeze([
     expectedTenantClaim: "Tenant_B",
   }),
 ] as const satisfies readonly [TrustedLaneRecord, TrustedLaneRecord]);
+
+/** A fixed session keeps one warm AgentCore Instance per lane; AgentCore needs at least 33 characters. */
+function pinnedSessionId(laneId: "Tenant_A" | "Tenant_B"): string | undefined {
+  const value =
+    laneId === "Tenant_A"
+      ? import.meta.env.VITE_TENANT_A_RUNTIME_SESSION_ID
+      : import.meta.env.VITE_TENANT_B_RUNTIME_SESSION_ID;
+  return value && value.length >= 33 ? value : undefined;
+}
 
 function invalidLane(): Error {
   return new Error("The selected authentication lane is invalid.");
@@ -222,7 +231,7 @@ export function establishSession(
     subject,
     tenantId: lane.expectedTenantClaim,
     expiresAt,
-    sessionId: crypto.randomUUID(),
+    sessionId: pinnedSessionId(lane.laneId) ?? crypto.randomUUID(),
     username,
     claims: safeClaims(payload, lane, subject, expiresAt),
   });
